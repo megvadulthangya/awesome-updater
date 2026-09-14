@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-SYSTEM_UPDATE_VERSION="0.1.0"
+SYSTEM_UPDATE_VERSION="@VERSION@"
 
 # ============================================================================
 # Fixed paths
@@ -46,24 +46,6 @@ LATEST_LOG="$LOG_DIR/latest_update.log"
 SCRIPT_PATH="/usr/bin/system-update"
 LEGACY_SCRIPT_PATH="/usr/local/bin/system-update"
 LEGACY_NOTIFY_PATH="/usr/local/bin/system-update-notify"
-
-# ============================================================================
-# ANSI colors (TTY only)
-# ============================================================================
-
-if [ -t 1 ]; then
-    C_RESET=$'\033[0m'
-    C_RED=$'\033[1;31m'
-    C_YELLOW=$'\033[1;33m'
-    C_GREEN=$'\033[1;32m'
-    C_BOLD=$'\033[1m'
-else
-    C_RESET=""
-    C_RED=""
-    C_YELLOW=""
-    C_GREEN=""
-    C_BOLD=""
-fi
 
 # ============================================================================
 # Basic helpers
@@ -149,6 +131,21 @@ read_reboot_flag() {
             CREATED_AT)      PENDING_REBOOT_CREATED_AT="$VALUE" ;;
         esac
     done < "$REBOOT_FLAG"
+}
+
+# Print "1" if a complete persistent reboot requirement exists on disk,
+# otherwise "0". Must be called in a context where the caller wants the
+# current on-disk truth (not the in-memory variables), typically via
+# command substitution from early failure paths.
+current_reboot_required() {
+    read_reboot_flag
+    if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+       [ -n "$PENDING_REBOOT_VERSION" ] &&
+       [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+        printf '1'
+    else
+        printf '0'
+    fi
 }
 
 write_reboot_flag() {
@@ -283,6 +280,29 @@ EOF
     return 0
 }
 
+# Emit the wall broadcast. Only called by the caller after it has already
+# decided that the meaningful state changed.
+post_wall_notification() {
+    local reason="$1"
+    local action="$2"
+    local detail="$3"
+
+    [ "${CONFIG[NOTIFY_WALL]}" = "true" ] || return 0
+
+    {
+        echo
+        echo "============================================================"
+        echo "SYSTEM UPDATE ATTENTION REQUIRED"
+        echo "============================================================"
+        [ -n "$reason" ] && echo "Reason : $reason"
+        [ -n "$detail" ] && echo "Detail : $detail"
+        [ -n "$action" ] && echo "Action : $action"
+        echo "Host   : $(hostname)"
+        echo "============================================================"
+        echo
+    } | run_sudo wall 2>/dev/null || true
+}
+
 # ============================================================================
 # Kernel helpers
 # ============================================================================
@@ -355,7 +375,6 @@ init_defaults() {
     CONFIG[LOG_RETENTION_DAYS]=30
 }
 
-# Safe parser: KEY=VALUE only, whitelist, no shell execution.
 parse_config_file() {
     local file="$1"
     local line key value
@@ -363,16 +382,13 @@ parse_config_file() {
     [ -r "$file" ] || return 0
 
     while IFS= read -r line || [ -n "$line" ]; do
-        # Trim leading and trailing whitespace
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
 
-        # Skip empty lines and comments
         case "$line" in
             ''|\#*) continue ;;
         esac
 
-        # Must contain an equals sign
         case "$line" in
             *=*) ;;
             *)
@@ -384,21 +400,17 @@ parse_config_file() {
         key="${line%%=*}"
         value="${line#*=}"
 
-        # Trim key
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
 
-        # Trim value
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
 
-        # Strip surrounding quotes from value
         case "$value" in
             \"*\") value="${value#\"}"; value="${value%\"}" ;;
             \'*\') value="${value#\'}"; value="${value%\'}" ;;
         esac
 
-        # Whitelist check
         case "$key" in
             OFFICIAL_UPDATES_ENABLED|AUR_ENABLED|AUTOMATIC_REBOOT|\
             REBOOT_TIME|INSTALL_CRONTAB|CRONTAB_SCHEDULE|\
@@ -418,15 +430,13 @@ load_config() {
 }
 
 # Configuration error handler. Called only after logging is initialized.
+# Uses sudo -n only, so this path can never block on an interactive prompt.
 config_error() {
     local msg="$1"
 
     echo "ERROR: Invalid configuration" >&2
     echo "$msg" >&2
 
-    # If the state directory exists, record the failure for the user.
-    # On a fresh installation the directory may not exist; do not create it
-    # just to report a configuration error.
     if [ -d "$STATE_DIR" ]; then
         local tmp
         tmp="$(mktemp 2>/dev/null || true)"
@@ -444,7 +454,7 @@ UPDATED_AT=$(date '+%Y-%m-%dT%H:%M:%S%z')
 HOSTNAME=$(hostname)
 SOURCE=system-update
 EOF
-            run_sudo install -D -m 644 "$tmp" "$ATTENTION_STATE" 2>/dev/null || true
+            sudo -n install -D -m 644 "$tmp" "$ATTENTION_STATE" 2>/dev/null || true
             rm -f "$tmp"
         fi
     fi
@@ -461,6 +471,63 @@ validate_boolean() {
             config_error "$key must be 'true' or 'false' (configured value: '$value')"
             ;;
     esac
+}
+
+# Validate a single cron field. Accepts *, N, N-M, N/S, N-M/S, */S and
+# comma-separated lists of those. All numeric values must lie in [min, max].
+validate_cron_field() {
+    local field="$1" min="$2" max="$3" name="$4"
+    local item step lo hi val ok
+
+    [ -n "$field" ] || config_error "$name must not be empty"
+
+    local IFS=','
+    for item in $field; do
+        [ -n "$item" ] || config_error "$name contains an empty list element"
+        ok=0
+
+        # */S
+        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^\*/([0-9]+)$ ]]; then
+            step="${BASH_REMATCH[1]}"
+            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
+            ok=1
+        fi
+
+        # N-M or N-M/S
+        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)-([0-9]+)(/([0-9]+))?$ ]]; then
+            lo="${BASH_REMATCH[1]}"
+            hi="${BASH_REMATCH[2]}"
+            step="${BASH_REMATCH[4]:-1}"
+            [ "$lo" -le "$hi" ] || config_error "$name has reversed range in '$item'"
+            [ "$lo" -ge "$min" ] || config_error "$name range below $min in '$item'"
+            [ "$hi" -le "$max" ] || config_error "$name range above $max in '$item'"
+            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
+            ok=1
+        fi
+
+        # N/S
+        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)/([0-9]+)$ ]]; then
+            val="${BASH_REMATCH[1]}"
+            step="${BASH_REMATCH[2]}"
+            [ "$val" -ge "$min" ] || config_error "$name value below $min in '$item'"
+            [ "$val" -le "$max" ] || config_error "$name value above $max in '$item'"
+            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
+            ok=1
+        fi
+
+        # N
+        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)$ ]]; then
+            val="${BASH_REMATCH[1]}"
+            [ "$val" -ge "$min" ] || config_error "$name value below $min in '$item'"
+            [ "$val" -le "$max" ] || config_error "$name value above $max in '$item'"
+            ok=1
+        fi
+
+        if [ "$ok" -eq 0 ]; then
+            config_error "$name has invalid element '$item'"
+        fi
+    done
+    return 0
 }
 
 validate_config() {
@@ -487,6 +554,14 @@ validate_config() {
         config_error "CRONTAB_SCHEDULE must contain exactly 5 fields (configured value: '$s')"
     fi
 
+    local f_min f_hour f_dom f_mon f_dow
+    read -r f_min f_hour f_dom f_mon f_dow <<< "$s"
+    validate_cron_field "$f_min"  0 59 "CRONTAB_SCHEDULE minute"
+    validate_cron_field "$f_hour" 0 23 "CRONTAB_SCHEDULE hour"
+    validate_cron_field "$f_dom"  1 31 "CRONTAB_SCHEDULE day-of-month"
+    validate_cron_field "$f_mon"  1 12 "CRONTAB_SCHEDULE month"
+    validate_cron_field "$f_dow"  0 7  "CRONTAB_SCHEDULE day-of-week"
+
     local l="${CONFIG[LOG_RETENTION_DAYS]}"
     if ! [[ "$l" =~ ^[0-9]+$ ]]; then
         config_error "LOG_RETENTION_DAYS must be a positive integer (configured value: '$l')"
@@ -502,7 +577,7 @@ validate_config() {
 
 check_required_commands() {
     local cmds=(
-        bash sudo pacman systemctl flock find tee ln uname
+        bash sudo pacman systemctl flock find tee ln uname id
         date sed awk head hostname grep sha256sum mktemp
         vercmp install
     )
@@ -550,8 +625,16 @@ ensure_state_dir() {
 }
 
 # The GUI autostart file belongs to the user and is created without sudo.
+# When NOTIFY_GUI=false, any previously created entry is removed so the
+# setting does not become inert after a first successful run.
 ensure_gui_autostart() {
-    [ "${CONFIG[NOTIFY_GUI]}" = "true" ] || return 0
+    if [ "${CONFIG[NOTIFY_GUI]}" != "true" ]; then
+        if [ -f "$GUI_AUTOSTART_FILE" ]; then
+            rm -f "$GUI_AUTOSTART_FILE"
+            echo "Removed GUI autostart entry (NOTIFY_GUI=false): $GUI_AUTOSTART_FILE"
+        fi
+        return 0
+    fi
 
     if [ -f "$GUI_AUTOSTART_FILE" ]; then
         return 0
@@ -624,6 +707,29 @@ check_legacy_migration() {
 # Crontab handling
 # ============================================================================
 
+# Remove only the updater's own crontab entries from the given text.
+# A line is removed only when the command field is exactly $SCRIPT_PATH or
+# $LEGACY_SCRIPT_PATH, so entries referencing the notification helper or
+# any other command are preserved.
+filter_updater_crontab() {
+    awk -v new="$SCRIPT_PATH" -v old="$LEGACY_SCRIPT_PATH" '
+        {
+            if (NF == 0) { print; next }
+            if ($0 ~ /^[[:space:]]*#/) { print; next }
+            # cron environment assignment, e.g. MAILTO=user@host
+            if ($1 ~ /=/) { print; next }
+            # @-style entry: command is field 2
+            if ($1 ~ /^@/) {
+                if ($2 == new || $2 == old) { next }
+                print; next
+            }
+            # standard 5-field entry: command is field 6
+            if (NF >= 6 && ($6 == new || $6 == old)) { next }
+            print
+        }
+    '
+}
+
 handle_crontab() {
     [ "${CONFIG[INSTALL_CRONTAB]}" = "true" ] || return 0
 
@@ -638,12 +744,7 @@ handle_crontab() {
     local existing filtered new_crontab
     existing="$(crontab -l 2>/dev/null || true)"
 
-    filtered="$(
-        printf '%s\n' "$existing" |
-        grep -vF "$SCRIPT_PATH" |
-        grep -vF "$LEGACY_SCRIPT_PATH" ||
-        true
-    )"
+    filtered="$(printf '%s\n' "$existing" | filter_updater_crontab || true)"
 
     if [ -n "$filtered" ]; then
         new_crontab="${filtered}"$'\n'"${entry}"
@@ -712,9 +813,9 @@ run_status() {
             if systemctl is-active --quiet "$timer" 2>/dev/null; then
                 echo "  Automatic reboot: scheduled (timer active)"
             else
-                echo "  Automatic reboot: required"
-                echo "  Timer: NOT ACTIVE"
-                echo "  The updater will retry scheduling on its next run."
+                echo "  Automatic reboot: timer not active"
+                echo "  The next update run will reconcile timer state with"
+                echo "  the active configuration."
             fi
         fi
     else
@@ -739,9 +840,16 @@ run_status() {
 # ============================================================================
 
 main_update() {
-    local exit_status=0
-
     # --- Identity --------------------------------------------------------
+    # Refuse to run as root. Running as root would use /root as $HOME,
+    # produce root-owned files inside the user's home, hide the GUI
+    # autostart entry from the real desktop user, and defeat the
+    # passwordless-sudo check.
+    if [ "$(id -u 2>/dev/null)" = "0" ]; then
+        echo "ERROR: This script must be run as a normal user, not as root." >&2
+        exit 1
+    fi
+
     local current_user
     current_user="$(whoami)"
 
@@ -812,7 +920,10 @@ main_update() {
     # --- Crontab --------------------------------------------------------
     echo
     echo "Crontab handling..."
-    handle_crontab || true
+    local cron_install_failed=0
+    if ! handle_crontab; then
+        cron_install_failed=1
+    fi
 
     # --- Kernel detection -----------------------------------------------
     echo
@@ -825,7 +936,7 @@ main_update() {
         echo "Running kernel: $RUNNING_KERNEL"
 
         write_attention_state \
-            1 1 0 0 0 \
+            1 1 "$(current_reboot_required)" 0 0 \
             "Could not determine the running kernel package" \
             "Review the system-update log and kernel state manually" \
             "Running kernel: $RUNNING_KERNEL" || true
@@ -939,7 +1050,7 @@ main_update() {
         echo "ERROR: No installed Manjaro kernel packages were detected."
 
         write_attention_state \
-            1 1 0 0 0 \
+            1 1 "$(current_reboot_required)" 0 0 \
             "No installed Manjaro kernel packages were detected" \
             "Review kernel installation before continuing" \
             "pacman -Q returned no linuxNNN kernel packages" || true
@@ -949,7 +1060,6 @@ main_update() {
 
     # --- Official update -------------------------------------------------
     local update_failed=0
-    local kernel_before_ok=1
 
     if [ "${CONFIG[OFFICIAL_UPDATES_ENABLED]}" = "true" ]; then
         echo
@@ -960,37 +1070,20 @@ main_update() {
         if ! run_sudo pacman -Syu --noconfirm; then
             echo "ERROR: Official package update failed."
             update_failed=1
-            kernel_before_ok=0
-
-            read_reboot_flag
-            local reboot_active=0
-            if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
-               [ -n "$PENDING_REBOOT_VERSION" ] &&
-               [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
-                reboot_active=1
-            fi
 
             local sig_result
             write_attention_state \
-                1 1 "$reboot_active" 0 0 \
+                1 1 "$(current_reboot_required)" 0 0 \
                 "Official system update failed" \
                 "Review the system-update log and resolve the package-manager error" \
                 "pacman -Syu returned a non-zero status"
             sig_result=$?
 
-            if [ "$sig_result" -eq 1 ] &&
-               [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
-                {
-                    echo
-                    echo "============================================================"
-                    echo "SYSTEM UPDATE ATTENTION REQUIRED"
-                    echo "============================================================"
-                    echo "Reason : Official system update failed"
-                    echo "Action : Review the system-update log"
-                    echo "Host   : $(hostname)"
-                    echo "============================================================"
-                    echo
-                } | run_sudo wall 2>/dev/null || true
+            if [ "$sig_result" -eq 1 ] && [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
+                post_wall_notification \
+                    "Official system update failed" \
+                    "Review the system-update log and resolve the package-manager error" \
+                    "pacman -Syu returned a non-zero status"
             fi
 
             exit 1
@@ -1015,7 +1108,7 @@ main_update() {
             if ! run_sudo pacman -S --needed --noconfirm base-devel git; then
                 echo "ERROR: Failed to install yay build dependencies."
                 write_attention_state \
-                    1 1 0 0 0 \
+                    1 1 "$(current_reboot_required)" 0 0 \
                     "Failed to install yay build dependencies" \
                     "AUR_ENABLED=true requires base-devel and git" \
                     "pacman -S base-devel git returned a non-zero status" || true
@@ -1032,7 +1125,7 @@ main_update() {
             if ! git clone https://aur.archlinux.org/yay.git "$yay_build"; then
                 echo "ERROR: Failed to clone yay."
                 write_attention_state \
-                    1 1 0 0 0 \
+                    1 1 "$(current_reboot_required)" 0 0 \
                     "Failed to clone yay from the AUR" \
                     "Check network connectivity to aur.archlinux.org" \
                     "git clone returned a non-zero status" || true
@@ -1044,7 +1137,7 @@ main_update() {
             if ! makepkg -si --noconfirm; then
                 echo "ERROR: Failed to build/install yay."
                 write_attention_state \
-                    1 1 0 0 0 \
+                    1 1 "$(current_reboot_required)" 0 0 \
                     "Failed to build/install yay" \
                     "Review the makepkg output in the system-update log" \
                     "makepkg -si returned a non-zero status" || true
@@ -1068,11 +1161,22 @@ main_update() {
 
         if ! yay -Sua --noconfirm; then
             echo "ERROR: AUR package update failed."
+
+            local sig_result
             write_attention_state \
-                1 1 0 0 0 \
+                1 1 "$(current_reboot_required)" 0 0 \
                 "AUR package update failed" \
                 "Review the yay output in the system-update log" \
-                "yay -Sua returned a non-zero status" || true
+                "yay -Sua returned a non-zero status"
+            sig_result=$?
+
+            if [ "$sig_result" -eq 1 ] && [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
+                post_wall_notification \
+                    "AUR package update failed" \
+                    "Review the system-update log" \
+                    "yay -Sua returned a non-zero status"
+            fi
+
             exit 1
         fi
 
@@ -1100,7 +1204,7 @@ main_update() {
     if [ "${#KERNEL_AFTER[@]}" -eq 0 ]; then
         echo "ERROR: No installed Manjaro kernel packages were detected after update."
         write_attention_state \
-            1 1 0 0 0 \
+            1 1 "$(current_reboot_required)" 0 0 \
             "No installed Manjaro kernel packages were detected after update" \
             "Review the update and kernel installation state" \
             "The kernel package inventory could not be reconstructed" || true
@@ -1320,11 +1424,30 @@ main_update() {
     local action=""
     local detail=""
 
-    if [ "$update_failed" -eq 1 ]; then
+    if [ "$cron_install_failed" -eq 1 ]; then
         attention=1
-        reason="Official system update failed"
-        action="Review the system-update log"
-        detail="pacman -Syu returned a non-zero status"
+        update_failed=1
+        reason="Automatic cron installation failed"
+        action="Check the user crontab and install the intended entry manually"
+    fi
+
+    if [ "$update_failed" -eq 1 ] && [ "$cron_install_failed" -ne 1 ]; then
+        attention=1
+        if [ -n "$reason" ]; then
+            reason="$reason | Official system update failed"
+        else
+            reason="Official system update failed"
+        fi
+        if [ -n "$action" ]; then
+            action="$action | Review the system-update log"
+        else
+            action="Review the system-update log"
+        fi
+        if [ -n "$detail" ]; then
+            detail="$detail | pacman -Syu returned a non-zero status"
+        else
+            detail="pacman -Syu returned a non-zero status"
+        fi
     fi
 
     if [ "$REBOOT_SCHEDULE_FAILED" -eq 1 ]; then
@@ -1412,18 +1535,7 @@ main_update() {
     elif [ "$sig_result" -eq 1 ] &&
          [ "$attention" -eq 1 ] &&
          [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
-        {
-            echo
-            echo "============================================================"
-            echo "SYSTEM UPDATE ATTENTION REQUIRED"
-            echo "============================================================"
-            [ -n "$reason" ] && echo "Reason : $reason"
-            [ -n "$detail" ] && echo "Detail : $detail"
-            [ -n "$action" ] && echo "Action : $action"
-            echo "Host   : $(hostname)"
-            echo "============================================================"
-            echo
-        } | run_sudo wall 2>/dev/null || true
+        post_wall_notification "$reason" "$action" "$detail"
     fi
 
     # --- Final status ----------------------------------------------------
@@ -1519,8 +1631,6 @@ main_update() {
     echo "============================================================"
 
     sleep 0.1
-
-    return "$exit_status"
 }
 
 # ============================================================================

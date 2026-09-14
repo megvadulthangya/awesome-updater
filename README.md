@@ -24,6 +24,10 @@ The package installs a working default configuration at:
 
 The defaults are safe and suitable for a fresh Manjaro system.
 
+If a previous manual installation of the original single-script version
+is still present on disk, read the migration section below before
+installing.
+
 ## Commands
 
     system-update                 # run the update
@@ -64,6 +68,12 @@ Supported keys:
     NOTIFY_WALL
     NOTIFY_GUI
     LOG_RETENTION_DAYS
+
+`NOTIFY_PROFILE_D` controls whether
+`/etc/profile.d/99-system-update.sh` prints the attention message on
+interactive login. The profile hook reads this key directly from the
+configuration hierarchy at login time; the updater does not rewrite the
+package-owned hook.
 
 ## AUR support
 
@@ -107,19 +117,24 @@ install its own entry, set in the configuration:
     CRONTAB_SCHEDULE="0 */6 * * *"
 
 Then run `system-update` once. The script adds (or updates) a crontab
-entry pointing at `/usr/bin/system-update`.
+entry pointing at `/usr/bin/system-update`. Existing entries that invoke
+the notification helper or any other command are preserved. Only entries
+whose command is exactly the updater path are replaced.
 
 ## Notifications
 
 Three notification channels are available:
 
 - **TTY / SSH login**: `/etc/profile.d/99-system-update.sh` invokes
-  `system-update-notify --tty` on interactive logins.
+  `system-update-notify --tty` on interactive logins when
+  `NOTIFY_PROFILE_D` is `true`. The hook is package-managed and is not
+  rewritten at runtime.
 - **Wall broadcast**: `system-update` calls `wall` when the attention
   state changes, reaching all connected terminals.
 - **Desktop**: an XDG autostart entry runs
   `system-update-notify --gui-watch` inside the desktop session. It uses
-  `notify-send` if available.
+  `notify-send` if available. Setting `NOTIFY_GUI=false` removes the
+  autostart entry on the next updater run.
 
 ## Logs
 
@@ -137,23 +152,36 @@ The state directory is fixed and is not configurable.
 
 ## Migration from an older manual installation
 
-If a previous manual installation exists at:
+A previous manual installation of the original single-script version may
+have created files that are not owned by any pacman package. Because
+pacman refuses to overwrite unowned files, the first package installation
+can fail unless those files are removed first.
+
+The paths to check are:
 
     /usr/local/bin/system-update
     /usr/local/bin/system-update-notify
+    /etc/profile.d/99-system-update.sh
+    /etc/system-update/config.conf
 
-those legacy files may shadow the package-managed binaries, since
-`/usr/local/bin` precedes `/usr/bin` in `PATH`.
+The first two shadow the package-managed binaries because `/usr/local/bin`
+precedes `/usr/bin` in `PATH`. The third conflicts directly with the
+`/etc/profile.d/99-system-update.sh` hook installed by the package. The
+fourth conflicts with the package-managed default configuration file.
 
-The runtime implementation detects legacy files and warns clearly. It does
-not delete them.
+The package refuses to delete any of these files automatically. The
+`pre_install` scriptlet of the package prints a non-destructive notice
+listing every unowned conflicting path it detects.
 
 To complete the migration manually:
 
     sudo rm -f /usr/local/bin/system-update
     sudo rm -f /usr/local/bin/system-update-notify
+    sudo rm -f /etc/profile.d/99-system-update.sh
+    sudo rm -f /etc/system-update/config.conf
 
-If a crontab entry still references the legacy path, update it.
+Then install the package. If a crontab entry still references the legacy
+path, update it to `/usr/bin/system-update`.
 
 ## License
 

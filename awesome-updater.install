@@ -1,3 +1,49 @@
+pre_install() {
+    # Non-destructive migration detection.
+    #
+    # A previous manual installation may have left files that are not
+    # owned by any package. pacman refuses to overwrite such files, so
+    # the first installation of this package can fail with a
+    # "file exists in filesystem" error. This notice lists the affected
+    # paths and instructs the user to review and remove them by hand.
+    #
+    # This scriptlet never deletes anything.
+    _legacy_paths=""
+    for _f in \
+        /etc/profile.d/99-system-update.sh \
+        /etc/system-update/config.conf \
+        /usr/bin/system-update \
+        /usr/bin/system-update-notify \
+        /usr/local/bin/system-update \
+        /usr/local/bin/system-update-notify
+    do
+        if [ -e "$_f" ] && ! pacman -Qo "$_f" >/dev/null 2>&1; then
+            _legacy_paths="$_legacy_paths
+  $_f"
+        fi
+    done
+
+    if [ -n "$_legacy_paths" ]; then
+        cat <<EOF
+:: awesome-updater migration notice
+::
+:: The following files exist on disk but are not owned by any package.
+:: They were most likely created by a previous manual installation.
+:: pacman cannot overwrite these files, so this transaction may fail
+:: with a "file exists in filesystem" error.
+::$_legacy_paths
+::
+:: Review each file, then remove or relocate it manually, for example:
+::
+::     sudo rm -f <path>
+::
+:: The updater does NOT delete these files automatically.
+EOF
+    fi
+
+    unset _legacy_paths _f
+}
+
 post_install() {
     cat <<'EOF'
 :: awesome-updater has been installed.

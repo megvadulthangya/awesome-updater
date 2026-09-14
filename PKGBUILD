@@ -9,6 +9,7 @@ license=('MIT')
 depends=(
     'bash'
     'coreutils'
+    'inetutils'
     'pacman'
     'systemd'
     'findutils'
@@ -21,6 +22,7 @@ optdepends=(
     'git: AUR support when AUR_ENABLED=true'
     'base-devel: AUR support when AUR_ENABLED=true'
     'libnotify: GUI desktop notifications via notify-send'
+    'cronie: crontab management when INSTALL_CRONTAB=true'
 )
 backup=('etc/system-update/config.conf')
 install=awesome-updater.install
@@ -47,6 +49,15 @@ sha256sums=(
     'SKIP'
     'SKIP'
 )
+
+prepare() {
+    # Single-source the runtime version string from pkgver.
+    sed -i "s/@VERSION@/$pkgver/g" "$srcdir/system-update"
+}
+
+build() {
+    : # nothing to build
+}
 
 package() {
     install -Dm755 "$srcdir/system-update" \
