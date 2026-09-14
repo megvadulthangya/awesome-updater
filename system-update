@@ -1,0 +1,1551 @@
+#!/bin/bash
+#
+# system-update
+#
+# Main executable provided by the awesome-updater package.
+#
+# Manjaro-focused unattended system updater.
+#
+# Configuration hierarchy:
+#     Built-in defaults
+#             |
+#     /etc/system-update/config.conf          (installed by the package)
+#             |
+#     ~/.config/system-update/config.conf     (optional user overrides)
+#
+# Configuration format is plain KEY=VALUE. No shell code is executed.
+#
+# See /usr/share/doc/awesome-updater/README.md for details.
+#
+
+set -uo pipefail
+
+SYSTEM_UPDATE_VERSION="0.1.0"
+
+# ============================================================================
+# Fixed paths
+# ============================================================================
+
+STATE_DIR="/var/lib/system-update"
+ATTENTION_STATE="$STATE_DIR/attention.state"
+REBOOT_FLAG="$STATE_DIR/kernel-reboot-needed"
+LOCKFILE="/tmp/system-update.lock"
+
+NOTIFY_HELPER="/usr/bin/system-update-notify"
+
+SYSTEM_CONFIG="/etc/system-update/config.conf"
+USER_CONFIG_DIR="$HOME/.config/system-update"
+USER_CONFIG="$USER_CONFIG_DIR/config.conf"
+
+GUI_AUTOSTART_DIR="$HOME/.config/autostart"
+GUI_AUTOSTART_FILE="$GUI_AUTOSTART_DIR/system-update-notify.desktop"
+
+LOG_DIR="$HOME/logs"
+LATEST_LOG="$LOG_DIR/latest_update.log"
+
+SCRIPT_PATH="/usr/bin/system-update"
+LEGACY_SCRIPT_PATH="/usr/local/bin/system-update"
+LEGACY_NOTIFY_PATH="/usr/local/bin/system-update-notify"
+
+# ============================================================================
+# ANSI colors (TTY only)
+# ============================================================================
+
+if [ -t 1 ]; then
+    C_RESET=$'\033[0m'
+    C_RED=$'\033[1;31m'
+    C_YELLOW=$'\033[1;33m'
+    C_GREEN=$'\033[1;32m'
+    C_BOLD=$'\033[1m'
+else
+    C_RESET=""
+    C_RED=""
+    C_YELLOW=""
+    C_GREEN=""
+    C_BOLD=""
+fi
+
+# ============================================================================
+# Basic helpers
+# ============================================================================
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_sudo() {
+    sudo "$@"
+}
+
+# ============================================================================
+# Static output
+# ============================================================================
+
+print_version() {
+    echo "system-update $SYSTEM_UPDATE_VERSION"
+}
+
+print_help() {
+    cat <<EOF
+system-update $SYSTEM_UPDATE_VERSION - Manjaro unattended system updater
+
+Usage:
+    system-update              Run update (unattended mode)
+    system-update --help       Show this help and exit
+    system-update --version    Show version and exit
+    system-update --status     Show current status (read-only)
+
+Configuration is loaded from:
+    /etc/system-update/config.conf          (package default)
+    ~/.config/system-update/config.conf     (optional user overrides)
+
+Logs:
+    ~/logs/latest_update.log
+    ~/logs/system-update_YYYY-MM-DD_HH-MM-SS.log
+
+State:
+    /var/lib/system-update/
+
+The package works with its defaults. No manual configuration is required.
+EOF
+}
+
+# ============================================================================
+# State variables
+# ============================================================================
+
+init_state_vars() {
+    PENDING_REBOOT_PACKAGE=""
+    PENDING_REBOOT_VERSION=""
+    PENDING_REBOOT_RUNNING_VERSION=""
+    PENDING_REBOOT_UNIT=""
+    PENDING_REBOOT_CREATED_AT=""
+
+    STATE_NEEDS_ATTENTION=0
+    STATE_UPDATE_FAILED=0
+    STATE_REBOOT_REQUIRED=0
+    STATE_REBOOT_SCHEDULE_FAILED=0
+    STATE_PACNEW_COUNT=0
+    STATE_REASON=""
+    STATE_ACTION=""
+    STATE_DETAIL=""
+}
+
+read_reboot_flag() {
+    PENDING_REBOOT_PACKAGE=""
+    PENDING_REBOOT_VERSION=""
+    PENDING_REBOOT_RUNNING_VERSION=""
+    PENDING_REBOOT_UNIT=""
+    PENDING_REBOOT_CREATED_AT=""
+
+    [ -r "$REBOOT_FLAG" ] || return 0
+
+    while IFS='=' read -r KEY VALUE; do
+        case "$KEY" in
+            KERNEL_PACKAGE)  PENDING_REBOOT_PACKAGE="$VALUE" ;;
+            TARGET_VERSION)  PENDING_REBOOT_VERSION="$VALUE" ;;
+            RUNNING_VERSION) PENDING_REBOOT_RUNNING_VERSION="$VALUE" ;;
+            REBOOT_UNIT)     PENDING_REBOOT_UNIT="$VALUE" ;;
+            CREATED_AT)      PENDING_REBOOT_CREATED_AT="$VALUE" ;;
+        esac
+    done < "$REBOOT_FLAG"
+}
+
+write_reboot_flag() {
+    local package="$1"
+    local target_version="$2"
+    local running_version="$3"
+    local unit="$4"
+    local created_at="$5"
+
+    local tmp
+    tmp="$(mktemp)" || return 1
+
+    cat > "$tmp" <<EOF
+KERNEL_PACKAGE=$package
+TARGET_VERSION=$target_version
+RUNNING_VERSION=$running_version
+REBOOT_UNIT=$unit
+CREATED_AT=$created_at
+EOF
+
+    if ! run_sudo install -D -m 644 "$tmp" "$REBOOT_FLAG"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    rm -f "$tmp"
+    return 0
+}
+
+clear_reboot_flag() {
+    if [ -e "$REBOOT_FLAG" ]; then
+        if ! run_sudo rm -f "$REBOOT_FLAG"; then
+            echo "WARNING: Failed to remove reboot flag: $REBOOT_FLAG"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+read_attention_state() {
+    STATE_NEEDS_ATTENTION=0
+    STATE_UPDATE_FAILED=0
+    STATE_REBOOT_REQUIRED=0
+    STATE_REBOOT_SCHEDULE_FAILED=0
+    STATE_PACNEW_COUNT=0
+    STATE_REASON=""
+    STATE_ACTION=""
+    STATE_DETAIL=""
+
+    [ -r "$ATTENTION_STATE" ] || return 0
+
+    while IFS='=' read -r KEY VALUE; do
+        case "$KEY" in
+            NEEDS_ATTENTION)        STATE_NEEDS_ATTENTION="$VALUE" ;;
+            UPDATE_FAILED)          STATE_UPDATE_FAILED="$VALUE" ;;
+            REBOOT_REQUIRED)        STATE_REBOOT_REQUIRED="$VALUE" ;;
+            REBOOT_SCHEDULE_FAILED) STATE_REBOOT_SCHEDULE_FAILED="$VALUE" ;;
+            PACNEW_COUNT)           STATE_PACNEW_COUNT="$VALUE" ;;
+            REASON)                 STATE_REASON="$VALUE" ;;
+            ACTION)                 STATE_ACTION="$VALUE" ;;
+            DETAIL)                 STATE_DETAIL="$VALUE" ;;
+        esac
+    done < "$ATTENTION_STATE"
+}
+
+# Returns 0 if state did not change, 1 if it changed, 2 on write error.
+write_attention_state() {
+    local needs_attention="$1"
+    local update_failed="$2"
+    local reboot_required="$3"
+    local reboot_schedule_failed="$4"
+    local pacnew_count="$5"
+    local reason="$6"
+    local action="$7"
+    local detail="$8"
+
+    local old_sig new_sig tmp
+
+    read_attention_state
+    old_sig="$(
+        printf '%s\n' \
+            "$STATE_NEEDS_ATTENTION" \
+            "$STATE_UPDATE_FAILED" \
+            "$STATE_REBOOT_REQUIRED" \
+            "$STATE_REBOOT_SCHEDULE_FAILED" \
+            "$STATE_PACNEW_COUNT" \
+            "$STATE_REASON" \
+            "$STATE_ACTION" \
+            "$STATE_DETAIL" |
+        sha256sum | awk '{print $1}'
+    )"
+
+    new_sig="$(
+        printf '%s\n' \
+            "$needs_attention" \
+            "$update_failed" \
+            "$reboot_required" \
+            "$reboot_schedule_failed" \
+            "$pacnew_count" \
+            "$reason" \
+            "$action" \
+            "$detail" |
+        sha256sum | awk '{print $1}'
+    )"
+
+    tmp="$(mktemp)" || return 2
+
+    cat > "$tmp" <<EOF
+NEEDS_ATTENTION=$needs_attention
+UPDATE_FAILED=$update_failed
+REBOOT_REQUIRED=$reboot_required
+REBOOT_SCHEDULE_FAILED=$reboot_schedule_failed
+PACNEW_COUNT=$pacnew_count
+REASON=$reason
+ACTION=$action
+DETAIL=$detail
+UPDATED_AT=$(date '+%Y-%m-%dT%H:%M:%S%z')
+HOSTNAME=$(hostname)
+SOURCE=system-update
+EOF
+
+    if ! run_sudo install -D -m 644 "$tmp" "$ATTENTION_STATE"; then
+        rm -f "$tmp"
+        return 2
+    fi
+
+    rm -f "$tmp"
+
+    if [ "$old_sig" != "$new_sig" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================================
+# Kernel helpers
+# ============================================================================
+
+detect_running_kernel_package() {
+    local running_kernel="$1"
+    local mhwd_output=""
+
+    RUNNING_KERNEL_PKG=""
+
+    if command_exists mhwd-kernel; then
+        mhwd_output="$(mhwd-kernel -li 2>/dev/null || true)"
+        RUNNING_KERNEL_PKG="$(
+            printf '%s\n' "$mhwd_output" |
+            sed -n 's/^Currently running:.* (\(linux[0-9]\+\)).*/\1/p' |
+            head -n 1
+        )"
+    fi
+
+    if [ -z "$RUNNING_KERNEL_PKG" ] &&
+       [ -d "/usr/lib/modules/$running_kernel" ]; then
+        RUNNING_KERNEL_PKG="$(
+            pacman -Qo "/usr/lib/modules/$running_kernel" 2>/dev/null |
+            sed -n 's/.* is owned by \(linux[0-9]\+\) .*/\1/p' |
+            head -n 1
+        )"
+    fi
+
+    [ -n "$RUNNING_KERNEL_PKG" ]
+}
+
+normalize_running_version() {
+    local version="$1"
+    printf '%s\n' "${version%-MANJARO}"
+}
+
+generate_reboot_unit() {
+    printf 'kernel-reboot-%s-%s\n' "$(date +%s)" "$$"
+}
+
+cancel_pending_reboot_unit() {
+    local unit="$1"
+    [ -n "$unit" ] || return 0
+
+    local timer="${unit}.timer"
+
+    echo "Cancelling pending reboot unit: $unit"
+    run_sudo systemctl stop "$timer" 2>/dev/null || true
+    run_sudo systemctl reset-failed "$timer" 2>/dev/null || true
+    run_sudo systemctl stop "$unit" 2>/dev/null || true
+    run_sudo systemctl reset-failed "$unit" 2>/dev/null || true
+}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+declare -A CONFIG
+
+init_defaults() {
+    CONFIG[OFFICIAL_UPDATES_ENABLED]=true
+    CONFIG[AUR_ENABLED]=false
+    CONFIG[AUTOMATIC_REBOOT]=true
+    CONFIG[REBOOT_TIME]="02:15:00"
+    CONFIG[INSTALL_CRONTAB]=false
+    CONFIG[CRONTAB_SCHEDULE]="0 */6 * * *"
+    CONFIG[NOTIFY_PROFILE_D]=true
+    CONFIG[NOTIFY_WALL]=true
+    CONFIG[NOTIFY_GUI]=true
+    CONFIG[LOG_RETENTION_DAYS]=30
+}
+
+# Safe parser: KEY=VALUE only, whitelist, no shell execution.
+parse_config_file() {
+    local file="$1"
+    local line key value
+
+    [ -r "$file" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Trim leading and trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+
+        # Skip empty lines and comments
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+
+        # Must contain an equals sign
+        case "$line" in
+            *=*) ;;
+            *)
+                echo "WARNING: Ignoring malformed line in $file: $line"
+                continue
+                ;;
+        esac
+
+        key="${line%%=*}"
+        value="${line#*=}"
+
+        # Trim key
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+
+        # Trim value
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+
+        # Strip surrounding quotes from value
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+
+        # Whitelist check
+        case "$key" in
+            OFFICIAL_UPDATES_ENABLED|AUR_ENABLED|AUTOMATIC_REBOOT|\
+            REBOOT_TIME|INSTALL_CRONTAB|CRONTAB_SCHEDULE|\
+            NOTIFY_PROFILE_D|NOTIFY_WALL|NOTIFY_GUI|LOG_RETENTION_DAYS)
+                CONFIG["$key"]="$value"
+                ;;
+            *)
+                echo "WARNING: Ignoring unknown configuration key '$key' in $file"
+                ;;
+        esac
+    done < "$file"
+}
+
+load_config() {
+    parse_config_file "$SYSTEM_CONFIG"
+    parse_config_file "$USER_CONFIG"
+}
+
+# Configuration error handler. Called only after logging is initialized.
+config_error() {
+    local msg="$1"
+
+    echo "ERROR: Invalid configuration" >&2
+    echo "$msg" >&2
+
+    # If the state directory exists, record the failure for the user.
+    # On a fresh installation the directory may not exist; do not create it
+    # just to report a configuration error.
+    if [ -d "$STATE_DIR" ]; then
+        local tmp
+        tmp="$(mktemp 2>/dev/null || true)"
+        if [ -n "$tmp" ]; then
+            cat > "$tmp" <<EOF
+NEEDS_ATTENTION=1
+UPDATE_FAILED=1
+REBOOT_REQUIRED=0
+REBOOT_SCHEDULE_FAILED=0
+PACNEW_COUNT=0
+REASON=Invalid configuration
+ACTION=Fix the configuration and re-run system-update
+DETAIL=$msg
+UPDATED_AT=$(date '+%Y-%m-%dT%H:%M:%S%z')
+HOSTNAME=$(hostname)
+SOURCE=system-update
+EOF
+            run_sudo install -D -m 644 "$tmp" "$ATTENTION_STATE" 2>/dev/null || true
+            rm -f "$tmp"
+        fi
+    fi
+
+    exit 1
+}
+
+validate_boolean() {
+    local key="$1"
+    local value="${CONFIG[$key]}"
+    case "$value" in
+        true|false) return 0 ;;
+        *)
+            config_error "$key must be 'true' or 'false' (configured value: '$value')"
+            ;;
+    esac
+}
+
+validate_config() {
+    validate_boolean OFFICIAL_UPDATES_ENABLED
+    validate_boolean AUR_ENABLED
+    validate_boolean AUTOMATIC_REBOOT
+    validate_boolean INSTALL_CRONTAB
+    validate_boolean NOTIFY_PROFILE_D
+    validate_boolean NOTIFY_WALL
+    validate_boolean NOTIFY_GUI
+
+    local t="${CONFIG[REBOOT_TIME]}"
+    if ! [[ "$t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$ ]]; then
+        config_error "REBOOT_TIME must be a valid 24-hour time in HH:MM:SS format (configured value: '$t')"
+    fi
+
+    local s="${CONFIG[CRONTAB_SCHEDULE]}"
+    if [ -z "$s" ]; then
+        config_error "CRONTAB_SCHEDULE must not be empty"
+    fi
+    local n
+    n="$(printf '%s\n' "$s" | awk '{print NF}')"
+    if [ "$n" -ne 5 ]; then
+        config_error "CRONTAB_SCHEDULE must contain exactly 5 fields (configured value: '$s')"
+    fi
+
+    local l="${CONFIG[LOG_RETENTION_DAYS]}"
+    if ! [[ "$l" =~ ^[0-9]+$ ]]; then
+        config_error "LOG_RETENTION_DAYS must be a positive integer (configured value: '$l')"
+    fi
+    if [ "$l" -lt 1 ]; then
+        config_error "LOG_RETENTION_DAYS must be >= 1 (configured value: '$l')"
+    fi
+}
+
+# ============================================================================
+# Prerequisite checks
+# ============================================================================
+
+check_required_commands() {
+    local cmds=(
+        bash sudo pacman systemctl flock find tee ln uname
+        date sed awk head hostname grep sha256sum mktemp
+        vercmp install
+    )
+
+    if [ "${CONFIG[AUTOMATIC_REBOOT]}" = "true" ]; then
+        cmds+=(systemd-run)
+    fi
+
+    if [ "${CONFIG[AUR_ENABLED]}" = "true" ]; then
+        cmds+=(git makepkg)
+    fi
+
+    local c
+    for c in "${cmds[@]}"; do
+        if ! command_exists "$c"; then
+            echo "ERROR: Required command not found: $c"
+            return 1
+        fi
+    done
+    return 0
+}
+
+check_passwordless_sudo() {
+    if ! sudo -n true >/dev/null 2>&1; then
+        echo "ERROR: Passwordless sudo is not available."
+        echo "This script requires unattended sudo access."
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================================
+# Runtime environment
+# ============================================================================
+
+ensure_state_dir() {
+    if [ ! -d "$STATE_DIR" ]; then
+        if ! run_sudo mkdir -p "$STATE_DIR"; then
+            echo "ERROR: Cannot create state directory: $STATE_DIR"
+            return 1
+        fi
+        run_sudo chmod 755 "$STATE_DIR"
+    fi
+    return 0
+}
+
+# The GUI autostart file belongs to the user and is created without sudo.
+ensure_gui_autostart() {
+    [ "${CONFIG[NOTIFY_GUI]}" = "true" ] || return 0
+
+    if [ -f "$GUI_AUTOSTART_FILE" ]; then
+        return 0
+    fi
+
+    if ! mkdir -p "$GUI_AUTOSTART_DIR"; then
+        echo "WARNING: Cannot create $GUI_AUTOSTART_DIR"
+        return 1
+    fi
+
+    cat > "$GUI_AUTOSTART_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=System Update Notification
+Comment=Monitors system-update attention state
+Exec=$NOTIFY_HELPER --gui-watch
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+    chmod 644 "$GUI_AUTOSTART_FILE"
+    echo "Created GUI autostart entry: $GUI_AUTOSTART_FILE"
+    return 0
+}
+
+# ============================================================================
+# Legacy migration warning
+# ============================================================================
+
+check_legacy_migration() {
+    local found=0
+
+    if [ -e "$LEGACY_SCRIPT_PATH" ]; then
+        found=1
+        echo
+        echo "WARNING: Legacy manual installation detected:"
+        echo "  $LEGACY_SCRIPT_PATH"
+    fi
+
+    if [ -e "$LEGACY_NOTIFY_PATH" ]; then
+        found=1
+        echo
+        echo "WARNING: Legacy manual installation detected:"
+        echo "  $LEGACY_NOTIFY_PATH"
+    fi
+
+    if [ "$found" -eq 1 ]; then
+        echo
+        echo "The package-managed version is: $SCRIPT_PATH"
+        echo "The legacy files were NOT removed automatically."
+        echo "They may shadow the package version because /usr/local/bin"
+        echo "precedes /usr/bin in PATH. Consider removing them:"
+        echo
+        echo "    sudo rm -f $LEGACY_SCRIPT_PATH"
+        echo "    sudo rm -f $LEGACY_NOTIFY_PATH"
+        echo
+    fi
+
+    if command_exists crontab; then
+        if crontab -l 2>/dev/null | grep -qF "$LEGACY_SCRIPT_PATH"; then
+            echo "WARNING: The user crontab references the legacy path:"
+            echo "  $LEGACY_SCRIPT_PATH"
+            echo "Update it to use $SCRIPT_PATH."
+            echo
+        fi
+    fi
+}
+
+# ============================================================================
+# Crontab handling
+# ============================================================================
+
+handle_crontab() {
+    [ "${CONFIG[INSTALL_CRONTAB]}" = "true" ] || return 0
+
+    if ! command_exists crontab; then
+        echo "WARNING: crontab command not available; cannot install entry."
+        return 1
+    fi
+
+    local schedule="${CONFIG[CRONTAB_SCHEDULE]}"
+    local entry="$schedule $SCRIPT_PATH >/dev/null 2>&1"
+
+    local existing filtered new_crontab
+    existing="$(crontab -l 2>/dev/null || true)"
+
+    filtered="$(
+        printf '%s\n' "$existing" |
+        grep -vF "$SCRIPT_PATH" |
+        grep -vF "$LEGACY_SCRIPT_PATH" ||
+        true
+    )"
+
+    if [ -n "$filtered" ]; then
+        new_crontab="${filtered}"$'\n'"${entry}"
+    else
+        new_crontab="${entry}"
+    fi
+
+    if printf '%s\n' "$new_crontab" | crontab -; then
+        echo "Crontab entry installed:"
+        echo "  $entry"
+        return 0
+    fi
+
+    echo "ERROR: Failed to install crontab entry."
+    return 1
+}
+
+# ============================================================================
+# Status mode (read-only, no sudo, no config validation)
+# ============================================================================
+
+run_status() {
+    init_state_vars
+
+    echo "System Update Status"
+    echo "===================="
+    echo
+    echo "Version: $SYSTEM_UPDATE_VERSION"
+
+    local running_kernel
+    running_kernel="$(uname -r 2>/dev/null || echo unknown)"
+    echo
+    echo "Kernel:"
+    echo "  Running: $running_kernel"
+
+    local running_pkg=""
+    if command_exists mhwd-kernel; then
+        running_pkg="$(
+            mhwd-kernel -li 2>/dev/null |
+            sed -n 's/^Currently running:.* (\(linux[0-9]\+\)).*/\1/p' |
+            head -n 1
+        )"
+    fi
+    if [ -z "$running_pkg" ] && [ -d "/usr/lib/modules/$running_kernel" ]; then
+        running_pkg="$(
+            pacman -Qo "/usr/lib/modules/$running_kernel" 2>/dev/null |
+            sed -n 's/.* is owned by \(linux[0-9]\+\) .*/\1/p' |
+            head -n 1
+        )"
+    fi
+    [ -n "$running_pkg" ] && echo "  Package: $running_pkg"
+
+    read_reboot_flag
+    if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+       [ -n "$PENDING_REBOOT_VERSION" ] &&
+       [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+        echo
+        echo "Pending reboot:"
+        echo "  Package:      $PENDING_REBOOT_PACKAGE"
+        echo "  Target:       $PENDING_REBOOT_VERSION"
+        echo "  Old running:  $PENDING_REBOOT_RUNNING_VERSION"
+        echo "  Created:      $PENDING_REBOOT_CREATED_AT"
+
+        if [ -n "$PENDING_REBOOT_UNIT" ]; then
+            local timer="${PENDING_REBOOT_UNIT}.timer"
+            if systemctl is-active --quiet "$timer" 2>/dev/null; then
+                echo "  Automatic reboot: scheduled (timer active)"
+            else
+                echo "  Automatic reboot: required"
+                echo "  Timer: NOT ACTIVE"
+                echo "  The updater will retry scheduling on its next run."
+            fi
+        fi
+    else
+        echo
+        echo "Pending reboot: none"
+    fi
+
+    read_attention_state
+    echo
+    if [ "$STATE_NEEDS_ATTENTION" = "1" ]; then
+        echo "Attention required: YES"
+        [ -n "$STATE_REASON" ] && echo "  Reason: $STATE_REASON"
+        [ -n "$STATE_DETAIL" ] && echo "  Detail: $STATE_DETAIL"
+        [ -n "$STATE_ACTION" ] && echo "  Action: $STATE_ACTION"
+    else
+        echo "Attention required: NO"
+    fi
+}
+
+# ============================================================================
+# Main updater flow
+# ============================================================================
+
+main_update() {
+    local exit_status=0
+
+    # --- Identity --------------------------------------------------------
+    local current_user
+    current_user="$(whoami)"
+
+    # --- Lock ------------------------------------------------------------
+    exec 9>"$LOCKFILE"
+    if ! flock -n 9; then
+        echo "$(date): Another system-update instance is already running. Exiting."
+        exit 0
+    fi
+
+    # --- Logging ---------------------------------------------------------
+    if ! mkdir -p "$LOG_DIR"; then
+        echo "ERROR: Cannot create log directory: $LOG_DIR"
+        exit 1
+    fi
+
+    LOG_FILE="$LOG_DIR/system-update_$(date +%Y-%m-%d_%H-%M-%S).log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    echo "============================================================"
+    echo "Manjaro system update started"
+    echo "Date: $(date)"
+    echo "User: $current_user"
+    echo "Home: $HOME"
+    echo "Hostname: $(hostname)"
+    echo "Version: $SYSTEM_UPDATE_VERSION"
+    echo "============================================================"
+
+    # --- Configuration ---------------------------------------------------
+    echo
+    echo "Loading configuration..."
+
+    init_defaults
+    load_config
+    validate_config
+
+    echo "Configuration loaded and validated."
+
+    # --- Prerequisites ---------------------------------------------------
+    echo
+    echo "Checking required commands..."
+    if ! check_required_commands; then
+        exit 1
+    fi
+    echo "All required commands are available."
+
+    echo
+    echo "Checking passwordless sudo..."
+    if ! check_passwordless_sudo; then
+        exit 1
+    fi
+    echo "Passwordless sudo is available."
+
+    # --- Runtime environment --------------------------------------------
+    echo
+    echo "Preparing runtime state directory..."
+    if ! ensure_state_dir; then
+        exit 1
+    fi
+
+    echo
+    echo "Ensuring user GUI autostart entry..."
+    ensure_gui_autostart || true
+
+    # --- Legacy migration warning ---------------------------------------
+    check_legacy_migration
+
+    # --- Crontab --------------------------------------------------------
+    echo
+    echo "Crontab handling..."
+    handle_crontab || true
+
+    # --- Kernel detection -----------------------------------------------
+    echo
+    echo "Detecting currently running kernel..."
+
+    RUNNING_KERNEL="$(uname -r)"
+
+    if ! detect_running_kernel_package "$RUNNING_KERNEL"; then
+        echo "ERROR: Could not determine the package providing the running kernel."
+        echo "Running kernel: $RUNNING_KERNEL"
+
+        write_attention_state \
+            1 1 0 0 0 \
+            "Could not determine the running kernel package" \
+            "Review the system-update log and kernel state manually" \
+            "Running kernel: $RUNNING_KERNEL" || true
+
+        exit 1
+    fi
+
+    echo "Running kernel version: $RUNNING_KERNEL"
+    echo "Running kernel package: $RUNNING_KERNEL_PKG"
+
+    # --- Process existing pending reboot state --------------------------
+    read_reboot_flag
+
+    if [ -n "$PENDING_REBOOT_PACKAGE" ] ||
+       [ -n "$PENDING_REBOOT_VERSION" ] ||
+       [ -n "$PENDING_REBOOT_RUNNING_VERSION" ] ||
+       [ -n "$PENDING_REBOOT_UNIT" ]; then
+
+        echo
+        echo "Pending kernel reboot state detected."
+        echo "  Package : $PENDING_REBOOT_PACKAGE"
+        echo "  Target  : $PENDING_REBOOT_VERSION"
+        echo "  Old run : $PENDING_REBOOT_RUNNING_VERSION"
+        echo "  Unit    : $PENDING_REBOOT_UNIT"
+        echo "  Created : $PENDING_REBOOT_CREATED_AT"
+
+        if [ -z "$PENDING_REBOOT_PACKAGE" ] ||
+           [ -z "$PENDING_REBOOT_VERSION" ] ||
+           [ -z "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+            echo "WARNING: Reboot state is incomplete."
+
+            if [ -n "$PENDING_REBOOT_UNIT" ]; then
+                cancel_pending_reboot_unit "$PENDING_REBOOT_UNIT"
+            fi
+            clear_reboot_flag || true
+
+            PENDING_REBOOT_PACKAGE=""
+            PENDING_REBOOT_VERSION=""
+            PENDING_REBOOT_RUNNING_VERSION=""
+            PENDING_REBOOT_UNIT=""
+            PENDING_REBOOT_CREATED_AT=""
+
+        elif ! pacman -Q "$PENDING_REBOOT_PACKAGE" >/dev/null 2>&1; then
+            echo "The pending kernel package is no longer installed."
+            cancel_pending_reboot_unit "$PENDING_REBOOT_UNIT"
+            clear_reboot_flag || true
+
+            PENDING_REBOOT_PACKAGE=""
+            PENDING_REBOOT_VERSION=""
+            PENDING_REBOOT_RUNNING_VERSION=""
+            PENDING_REBOOT_UNIT=""
+            PENDING_REBOOT_CREATED_AT=""
+
+        elif [ "$RUNNING_KERNEL_PKG" != "$PENDING_REBOOT_PACKAGE" ]; then
+            echo
+            echo "The pending target kernel package is not currently running."
+            echo "Keeping the persistent reboot state."
+
+        else
+            RUNNING_KERNEL_NORMALIZED="$(normalize_running_version "$RUNNING_KERNEL")"
+
+            VERSION_COMPARISON="$(
+                vercmp \
+                    "$RUNNING_KERNEL_NORMALIZED" \
+                    "$PENDING_REBOOT_VERSION" \
+                    2>/dev/null
+            )"
+
+            if ! [[ "$VERSION_COMPARISON" =~ ^-?[0-9]+$ ]]; then
+                echo "ERROR: Could not compare running kernel to target version."
+                echo "Keeping the persistent reboot state."
+
+            elif [ "$VERSION_COMPARISON" -ge 0 ]; then
+                echo
+                echo "The target kernel is now actually running."
+                echo "The required reboot has completed."
+
+                if [ -n "$PENDING_REBOOT_UNIT" ]; then
+                    cancel_pending_reboot_unit "$PENDING_REBOOT_UNIT"
+                fi
+                clear_reboot_flag || true
+
+                PENDING_REBOOT_PACKAGE=""
+                PENDING_REBOOT_VERSION=""
+                PENDING_REBOOT_RUNNING_VERSION=""
+                PENDING_REBOOT_UNIT=""
+                PENDING_REBOOT_CREATED_AT=""
+            else
+                echo
+                echo "The target kernel is installed but is not yet running."
+            fi
+        fi
+    fi
+
+    # --- Record installed kernels BEFORE ---------------------------------
+    echo
+    echo "Recording installed kernel packages before update..."
+
+    declare -A KERNEL_BEFORE
+
+    while read -r pkg ver; do
+        [ -n "$pkg" ] || continue
+        KERNEL_BEFORE["$pkg"]="$ver"
+        echo "  $pkg $ver"
+    done < <(
+        pacman -Q 2>/dev/null |
+        awk '$1 ~ /^linux[0-9]+$/ {print $1, $2}'
+    )
+
+    if [ "${#KERNEL_BEFORE[@]}" -eq 0 ]; then
+        echo "ERROR: No installed Manjaro kernel packages were detected."
+
+        write_attention_state \
+            1 1 0 0 0 \
+            "No installed Manjaro kernel packages were detected" \
+            "Review kernel installation before continuing" \
+            "pacman -Q returned no linuxNNN kernel packages" || true
+
+        exit 1
+    fi
+
+    # --- Official update -------------------------------------------------
+    local update_failed=0
+    local kernel_before_ok=1
+
+    if [ "${CONFIG[OFFICIAL_UPDATES_ENABLED]}" = "true" ]; then
+        echo
+        echo "============================================================"
+        echo "Updating official Manjaro packages"
+        echo "============================================================"
+
+        if ! run_sudo pacman -Syu --noconfirm; then
+            echo "ERROR: Official package update failed."
+            update_failed=1
+            kernel_before_ok=0
+
+            read_reboot_flag
+            local reboot_active=0
+            if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+               [ -n "$PENDING_REBOOT_VERSION" ] &&
+               [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+                reboot_active=1
+            fi
+
+            local sig_result
+            write_attention_state \
+                1 1 "$reboot_active" 0 0 \
+                "Official system update failed" \
+                "Review the system-update log and resolve the package-manager error" \
+                "pacman -Syu returned a non-zero status"
+            sig_result=$?
+
+            if [ "$sig_result" -eq 1 ] &&
+               [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
+                {
+                    echo
+                    echo "============================================================"
+                    echo "SYSTEM UPDATE ATTENTION REQUIRED"
+                    echo "============================================================"
+                    echo "Reason : Official system update failed"
+                    echo "Action : Review the system-update log"
+                    echo "Host   : $(hostname)"
+                    echo "============================================================"
+                    echo
+                } | run_sudo wall 2>/dev/null || true
+            fi
+
+            exit 1
+        fi
+
+        echo "Official package update completed successfully."
+    else
+        echo
+        echo "Official updates are disabled by configuration."
+    fi
+
+    # --- AUR update ------------------------------------------------------
+    if [ "${CONFIG[AUR_ENABLED]}" = "true" ]; then
+        echo
+        echo "============================================================"
+        echo "AUR support is enabled"
+        echo "============================================================"
+
+        if ! command_exists yay; then
+            echo "yay is not installed. Installing it from the AUR."
+
+            if ! run_sudo pacman -S --needed --noconfirm base-devel git; then
+                echo "ERROR: Failed to install yay build dependencies."
+                write_attention_state \
+                    1 1 0 0 0 \
+                    "Failed to install yay build dependencies" \
+                    "AUR_ENABLED=true requires base-devel and git" \
+                    "pacman -S base-devel git returned a non-zero status" || true
+                exit 1
+            fi
+
+            local yay_build="$HOME/.cache/yay-bootstrap"
+            rm -rf "$yay_build"
+            mkdir -p "$(dirname "$yay_build")" || {
+                echo "ERROR: Cannot create yay bootstrap directory."
+                exit 1
+            }
+
+            if ! git clone https://aur.archlinux.org/yay.git "$yay_build"; then
+                echo "ERROR: Failed to clone yay."
+                write_attention_state \
+                    1 1 0 0 0 \
+                    "Failed to clone yay from the AUR" \
+                    "Check network connectivity to aur.archlinux.org" \
+                    "git clone returned a non-zero status" || true
+                exit 1
+            fi
+
+            cd "$yay_build" || { echo "ERROR: Cannot enter yay build directory."; exit 1; }
+
+            if ! makepkg -si --noconfirm; then
+                echo "ERROR: Failed to build/install yay."
+                write_attention_state \
+                    1 1 0 0 0 \
+                    "Failed to build/install yay" \
+                    "Review the makepkg output in the system-update log" \
+                    "makepkg -si returned a non-zero status" || true
+                exit 1
+            fi
+
+            cd "$HOME" || true
+
+            if ! command_exists yay; then
+                echo "ERROR: yay is still unavailable after installation."
+                exit 1
+            fi
+
+            echo "yay installed successfully."
+        else
+            echo "yay is already installed."
+        fi
+
+        echo
+        echo "Updating AUR packages..."
+
+        if ! yay -Sua --noconfirm; then
+            echo "ERROR: AUR package update failed."
+            write_attention_state \
+                1 1 0 0 0 \
+                "AUR package update failed" \
+                "Review the yay output in the system-update log" \
+                "yay -Sua returned a non-zero status" || true
+            exit 1
+        fi
+
+        echo "AUR package update completed successfully."
+    else
+        echo
+        echo "AUR updates: disabled (AUR_ENABLED=false)."
+    fi
+
+    # --- Record installed kernels AFTER ----------------------------------
+    echo
+    echo "Recording installed kernel packages after update..."
+
+    declare -A KERNEL_AFTER
+
+    while read -r pkg ver; do
+        [ -n "$pkg" ] || continue
+        KERNEL_AFTER["$pkg"]="$ver"
+        echo "  $pkg $ver"
+    done < <(
+        pacman -Q 2>/dev/null |
+        awk '$1 ~ /^linux[0-9]+$/ {print $1, $2}'
+    )
+
+    if [ "${#KERNEL_AFTER[@]}" -eq 0 ]; then
+        echo "ERROR: No installed Manjaro kernel packages were detected after update."
+        write_attention_state \
+            1 1 0 0 0 \
+            "No installed Manjaro kernel packages were detected after update" \
+            "Review the update and kernel installation state" \
+            "The kernel package inventory could not be reconstructed" || true
+        exit 1
+    fi
+
+    # --- Kernel change detection ----------------------------------------
+    KERNEL_PACKAGE_CHANGED=0
+    RUNNING_KERNEL_PACKAGE_CHANGED=0
+    TARGET_KERNEL_VERSION=""
+
+    echo
+    echo "Comparing kernel package versions..."
+
+    for pkg in "${!KERNEL_BEFORE[@]}"; do
+        local before_ver="${KERNEL_BEFORE[$pkg]}"
+        local after_ver="${KERNEL_AFTER[$pkg]:-NOT_INSTALLED}"
+
+        if [ "$before_ver" != "$after_ver" ]; then
+            echo
+            echo "Kernel package changed:"
+            echo "  Package: $pkg"
+            echo "  Before : $before_ver"
+            echo "  After  : $after_ver"
+
+            KERNEL_PACKAGE_CHANGED=1
+
+            if [ "$pkg" = "$RUNNING_KERNEL_PKG" ]; then
+                RUNNING_KERNEL_PACKAGE_CHANGED=1
+                TARGET_KERNEL_VERSION="$after_ver"
+            fi
+        fi
+    done
+
+    for pkg in "${!KERNEL_AFTER[@]}"; do
+        if [ -z "${KERNEL_BEFORE[$pkg]+x}" ]; then
+            echo
+            echo "New kernel package installed:"
+            echo "  Package: $pkg"
+            echo "  Version: ${KERNEL_AFTER[$pkg]}"
+            KERNEL_PACKAGE_CHANGED=1
+        fi
+    done
+
+    # --- Persist reboot requirement -------------------------------------
+    read_reboot_flag
+
+    if [ "$RUNNING_KERNEL_PACKAGE_CHANGED" -eq 1 ]; then
+        echo
+        echo "The package providing the currently running kernel was updated."
+
+        if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+           [ "$PENDING_REBOOT_PACKAGE" = "$RUNNING_KERNEL_PKG" ] &&
+           [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+            echo "A reboot is already pending for this kernel package."
+            echo "Updating the target version only."
+
+            local orig_created="$PENDING_REBOOT_CREATED_AT"
+            local orig_running="$PENDING_REBOOT_RUNNING_VERSION"
+            local existing_unit="$PENDING_REBOOT_UNIT"
+
+            [ -n "$orig_created" ] || orig_created="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+            if ! write_reboot_flag \
+                "$RUNNING_KERNEL_PKG" \
+                "$TARGET_KERNEL_VERSION" \
+                "$orig_running" \
+                "$existing_unit" \
+                "$orig_created"; then
+                echo "ERROR: Failed to update persistent reboot state."
+                exit 1
+            fi
+        else
+            echo "Creating a new persistent reboot requirement."
+
+            local new_unit
+            new_unit="$(generate_reboot_unit)"
+            local now_created
+            now_created="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+            if ! write_reboot_flag \
+                "$RUNNING_KERNEL_PKG" \
+                "$TARGET_KERNEL_VERSION" \
+                "$RUNNING_KERNEL" \
+                "$new_unit" \
+                "$now_created"; then
+                echo "ERROR: Failed to create persistent reboot state."
+                exit 1
+            fi
+        fi
+    fi
+
+    # --- Refresh reboot state -------------------------------------------
+    read_reboot_flag
+
+    REBOOT_REQUIRED=0
+    if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+       [ -n "$PENDING_REBOOT_VERSION" ] &&
+       [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+        REBOOT_REQUIRED=1
+    fi
+
+    # --- Reboot scheduling ----------------------------------------------
+    REBOOT_SCHEDULE_FAILED=0
+
+    if [ "$REBOOT_REQUIRED" -eq 1 ]; then
+        echo
+        echo "============================================================"
+        echo "Kernel reboot state"
+        echo "============================================================"
+
+        if [ "${CONFIG[AUTOMATIC_REBOOT]}" = "false" ]; then
+            echo "Automatic reboot is disabled."
+            echo "Manual reboot is required."
+        else
+            if ! systemd-run --help 2>/dev/null | grep -q -- '--collect'; then
+                echo "ERROR: systemd-run does not support --collect."
+                REBOOT_SCHEDULE_FAILED=1
+            elif ! systemd-run --help 2>/dev/null | grep -q -- '--on-calendar'; then
+                echo "ERROR: systemd-run does not support --on-calendar."
+                REBOOT_SCHEDULE_FAILED=1
+            else
+                local existing_timer=""
+                if [ -n "$PENDING_REBOOT_UNIT" ]; then
+                    existing_timer="${PENDING_REBOOT_UNIT}.timer"
+                fi
+
+                local timer_active=0
+                if [ -n "$existing_timer" ] &&
+                   run_sudo systemctl is-active --quiet \
+                       "$existing_timer" 2>/dev/null; then
+                    timer_active=1
+                fi
+
+                if [ "$timer_active" -eq 1 ]; then
+                    echo "An existing one-time reboot timer is already active."
+                    echo "Timer: $existing_timer"
+                    echo "Leaving it untouched."
+                else
+                    local now_epoch today_epoch reboot_at
+                    now_epoch="$(date +%s)"
+                    today_epoch="$(date -d "today ${CONFIG[REBOOT_TIME]}" +%s)"
+
+                    if [ "$today_epoch" -gt "$now_epoch" ]; then
+                        reboot_at="$(date -d "today ${CONFIG[REBOOT_TIME]}" '+%Y-%m-%d %H:%M:%S')"
+                    else
+                        reboot_at="$(date -d "tomorrow ${CONFIG[REBOOT_TIME]}" '+%Y-%m-%d %H:%M:%S')"
+                    fi
+
+                    local new_reboot_unit
+                    new_reboot_unit="$(generate_reboot_unit)"
+
+                    echo "Scheduling one-time kernel reboot for:"
+                    echo "  $reboot_at"
+                    echo "Transient unit:"
+                    echo "  $new_reboot_unit"
+
+                    local orig_created="$PENDING_REBOOT_CREATED_AT"
+                    [ -n "$orig_created" ] || orig_created="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+                    if ! write_reboot_flag \
+                        "$PENDING_REBOOT_PACKAGE" \
+                        "$PENDING_REBOOT_VERSION" \
+                        "$PENDING_REBOOT_RUNNING_VERSION" \
+                        "$new_reboot_unit" \
+                        "$orig_created"; then
+                        echo "ERROR: Failed to update reboot scheduling state."
+                        REBOOT_SCHEDULE_FAILED=1
+                    else
+                        local systemd_run_output
+                        systemd_run_output="$(
+                            run_sudo systemd-run \
+                                --collect \
+                                --unit="$new_reboot_unit" \
+                                --on-calendar="$reboot_at" \
+                                --description="One-time reboot after kernel package update" \
+                                /usr/bin/systemctl reboot --no-block \
+                                2>&1
+                        )"
+                        local status=$?
+
+                        if [ "$status" -eq 0 ]; then
+                            echo "One-time kernel reboot timer created successfully."
+                        else
+                            echo "ERROR: Failed to create the one-time reboot timer."
+                            echo "systemd-run output:"
+                            printf '%s\n' "$systemd_run_output"
+                            REBOOT_SCHEDULE_FAILED=1
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # --- .pacnew detection ----------------------------------------------
+    echo
+    echo "Checking for .pacnew files..."
+
+    local pacnew_count
+    pacnew_count="$(
+        find /etc -type f -name '*.pacnew' 2>/dev/null | wc -l
+    )"
+    pacnew_count="${pacnew_count//[[:space:]]/}"
+
+    echo ".pacnew files found: $pacnew_count"
+
+    if [ "$pacnew_count" -gt 0 ]; then
+        echo
+        echo "WARNING: The following .pacnew files require manual review:"
+        find /etc -type f -name '*.pacnew' 2>/dev/null | sed 's/^/  /'
+    fi
+
+    # --- Build consolidated attention state -----------------------------
+    local attention=0
+    local reason=""
+    local action=""
+    local detail=""
+
+    if [ "$update_failed" -eq 1 ]; then
+        attention=1
+        reason="Official system update failed"
+        action="Review the system-update log"
+        detail="pacman -Syu returned a non-zero status"
+    fi
+
+    if [ "$REBOOT_SCHEDULE_FAILED" -eq 1 ]; then
+        attention=1
+        if [ -n "$reason" ]; then
+            reason="$reason | Kernel reboot scheduling failed"
+        else
+            reason="Kernel reboot scheduling failed"
+        fi
+        if [ -n "$action" ]; then
+            action="$action | Check the system-update log"
+        else
+            action="Check the system-update log; the reboot requirement remains pending"
+        fi
+        if [ -n "$detail" ]; then
+            detail="$detail | Automatic reboot timer could not be created"
+        else
+            detail="Automatic reboot timer could not be created"
+        fi
+    elif [ "$REBOOT_REQUIRED" -eq 1 ]; then
+        attention=1
+        if [ -n "$reason" ]; then
+            reason="$reason | Kernel reboot required"
+        else
+            reason="Kernel reboot required"
+        fi
+        local reboot_action
+        if [ "${CONFIG[AUTOMATIC_REBOOT]}" = "true" ]; then
+            reboot_action="Reboot will occur automatically at ${CONFIG[REBOOT_TIME]}"
+        else
+            reboot_action="Reboot the server manually"
+        fi
+        if [ -n "$action" ]; then
+            action="$action | $reboot_action"
+        else
+            action="$reboot_action"
+        fi
+        local reboot_detail="Running: $RUNNING_KERNEL / Target: $PENDING_REBOOT_VERSION"
+        if [ -n "$detail" ]; then
+            detail="$detail | $reboot_detail"
+        else
+            detail="$reboot_detail"
+        fi
+    fi
+
+    if [ "$pacnew_count" -gt 0 ]; then
+        attention=1
+        if [ -n "$reason" ]; then
+            reason="$reason | .pacnew files require review"
+        else
+            reason=".pacnew files require review"
+        fi
+        if [ -n "$action" ]; then
+            action="$action | Review /etc/*.pacnew files"
+        else
+            action="Review the .pacnew files before relying on the updated configuration"
+        fi
+        if [ -n "$detail" ]; then
+            detail="$detail | $pacnew_count .pacnew file(s)"
+        else
+            detail="$pacnew_count .pacnew file(s) found"
+        fi
+    fi
+
+    if [ "$attention" -eq 0 ]; then
+        reason=""
+        action=""
+        detail=""
+    fi
+
+    local sig_result
+    write_attention_state \
+        "$attention" \
+        "$update_failed" \
+        "$REBOOT_REQUIRED" \
+        "$REBOOT_SCHEDULE_FAILED" \
+        "$pacnew_count" \
+        "$reason" \
+        "$action" \
+        "$detail"
+    sig_result=$?
+
+    if [ "$sig_result" -eq 2 ]; then
+        echo "WARNING: Failed to persist attention state."
+    elif [ "$sig_result" -eq 1 ] &&
+         [ "$attention" -eq 1 ] &&
+         [ "${CONFIG[NOTIFY_WALL]}" = "true" ]; then
+        {
+            echo
+            echo "============================================================"
+            echo "SYSTEM UPDATE ATTENTION REQUIRED"
+            echo "============================================================"
+            [ -n "$reason" ] && echo "Reason : $reason"
+            [ -n "$detail" ] && echo "Detail : $detail"
+            [ -n "$action" ] && echo "Action : $action"
+            echo "Host   : $(hostname)"
+            echo "============================================================"
+            echo
+        } | run_sudo wall 2>/dev/null || true
+    fi
+
+    # --- Final status ----------------------------------------------------
+    echo
+    echo "============================================================"
+    echo "Final system status"
+    echo "============================================================"
+
+    local final_running
+    final_running="$(uname -r)"
+    echo "Currently running kernel:"
+    echo "  $final_running"
+
+    if detect_running_kernel_package "$final_running"; then
+        echo "Currently running kernel package:"
+        echo "  $RUNNING_KERNEL_PKG"
+    fi
+
+    if command_exists mhwd-kernel; then
+        echo
+        echo "Manjaro kernel information:"
+        mhwd-kernel -li 2>/dev/null || true
+    fi
+
+    echo
+
+    read_reboot_flag
+
+    if [ -n "$PENDING_REBOOT_PACKAGE" ] &&
+       [ -n "$PENDING_REBOOT_VERSION" ] &&
+       [ -n "$PENDING_REBOOT_RUNNING_VERSION" ]; then
+        echo "REBOOT REQUIRED: yes"
+        echo "  Package : $PENDING_REBOOT_PACKAGE"
+        echo "  Target  : $PENDING_REBOOT_VERSION"
+        echo "  Old run : $PENDING_REBOOT_RUNNING_VERSION"
+        echo "  Unit    : $PENDING_REBOOT_UNIT"
+        echo "  Created : $PENDING_REBOOT_CREATED_AT"
+
+        if [ -n "$PENDING_REBOOT_UNIT" ]; then
+            local final_timer="${PENDING_REBOOT_UNIT}.timer"
+            if run_sudo systemctl is-active --quiet "$final_timer" 2>/dev/null; then
+                echo
+                echo "Reboot timer: active"
+                run_sudo systemctl list-timers "$final_timer" --no-pager || true
+            else
+                echo
+                if [ "${CONFIG[AUTOMATIC_REBOOT]}" = "true" ]; then
+                    echo "WARNING: Reboot is required, but no active reboot timer exists."
+                    echo "A later run will retry scheduling it."
+                else
+                    echo "Automatic reboot is disabled. Manual reboot required."
+                fi
+            fi
+        fi
+    else
+        echo "REBOOT REQUIRED: no"
+    fi
+
+    echo
+    echo "Attention state:"
+    if [ -r "$ATTENTION_STATE" ]; then
+        while IFS= read -r line; do
+            echo "  $line"
+        done < "$ATTENTION_STATE"
+    else
+        echo "  State file is not available."
+    fi
+
+    # --- Log rotation ----------------------------------------------------
+    ln -sfn "$LOG_FILE" "$LATEST_LOG"
+
+    echo
+    echo "Cleaning update logs older than ${CONFIG[LOG_RETENTION_DAYS]} days..."
+
+    find "$LOG_DIR" \
+        -name "system-update_*.log" \
+        -type f \
+        -mtime +"${CONFIG[LOG_RETENTION_DAYS]}" \
+        -delete 2>/dev/null || true
+
+    if [ -L "$LATEST_LOG" ] && [ ! -e "$LATEST_LOG" ]; then
+        rm -f "$LATEST_LOG"
+    fi
+
+    echo "Log cleanup completed."
+
+    echo
+    echo "============================================================"
+    echo "System update completed"
+    echo "Date: $(date)"
+    echo "Log file: $LOG_FILE"
+    echo "Latest log: $LATEST_LOG"
+    echo "============================================================"
+
+    sleep 0.1
+
+    return "$exit_status"
+}
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+case "${1:-}" in
+    --help|-h)
+        print_help
+        exit 0
+        ;;
+    --version|-V)
+        print_version
+        exit 0
+        ;;
+    --status)
+        run_status
+        exit 0
+        ;;
+    "")
+        main_update
+        ;;
+    *)
+        echo "ERROR: Unknown option: $1" >&2
+        echo "Run 'system-update --help' for usage." >&2
+        exit 2
+        ;;
+esac

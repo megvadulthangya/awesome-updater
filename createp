@@ -1,0 +1,128 @@
+#!/bin/bash
+#
+# create-project-tree.sh
+#
+# Bootstrap script for the awesome-updater project.
+#
+# Purpose:
+#   Create the project directory tree and empty files only.
+#   No implementation, documentation, or configuration content is written.
+#
+# Behavior:
+#   - Uses the directory of this script as the project's parent directory.
+#   - Idempotent: safe to run multiple times.
+#   - Never overwrites existing non-empty files.
+#   - Fails if a required file path is occupied by a directory,
+#     or a required directory path is occupied by a file.
+#
+# Usage:
+#   ./create-project-tree.sh
+
+set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# Resolve script location, independent of current working directory
+# ----------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR/awesome-updater"
+
+# ----------------------------------------------------------------------------
+# Project layout
+# ----------------------------------------------------------------------------
+
+DIRS=(
+    "profile.d"
+    "config"
+    "man"
+    ".github"
+    ".github/workflows"
+)
+
+FILES=(
+    "PKGBUILD"
+    "awesome-updater.install"
+    "system-update"
+    "system-update-notify"
+    "profile.d/99-system-update.sh"
+    "config/config.conf"
+    "man/system-update.1"
+    "man/system-update-notify.1"
+    "README.md"
+    "LICENSE"
+    "CHANGELOG.md"
+    ".github/workflows/shellcheck.yml"
+)
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+ensure_dir() {
+    local rel="$1"
+    local abs="$PROJECT_ROOT/$rel"
+
+    if [ -d "$abs" ]; then
+        echo "  dir exists:  $rel/"
+        return 0
+    fi
+
+    if [ -L "$abs" ] || [ -e "$abs" ]; then
+        fail "expected directory, found non-directory: $abs"
+    fi
+
+    mkdir -p "$abs"
+    echo "  dir created: $rel/"
+}
+
+ensure_empty_file() {
+    local rel="$1"
+    local abs="$PROJECT_ROOT/$rel"
+
+    if [ -d "$abs" ]; then
+        fail "expected file, found directory: $abs"
+    fi
+
+    if [ -L "$abs" ] || [ -e "$abs" ]; then
+        if [ -s "$abs" ]; then
+            echo "  file exists (non-empty, untouched): $rel"
+        else
+            echo "  file exists (empty, untouched):     $rel"
+        fi
+        return 0
+    fi
+
+    # Parent directory must exist; create defensively.
+    mkdir -p "$(dirname -- "$abs")"
+
+    # Create a genuinely empty file.
+    : > "$abs"
+    echo "  file created (empty): $rel"
+}
+
+# ----------------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------------
+
+echo "Project root: $PROJECT_ROOT"
+echo
+
+echo "Creating directories:"
+for d in "${DIRS[@]}"; do
+    ensure_dir "$d"
+done
+
+echo
+echo "Creating empty files:"
+for f in "${FILES[@]}"; do
+    ensure_empty_file "$f"
+done
+
+echo
+echo "Bootstrap complete."
+echo "All project files are empty (0 bytes)."

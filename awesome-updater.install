@@ -1,0 +1,68 @@
+post_install() {
+    cat <<'EOF'
+:: awesome-updater has been installed.
+
+The package works with its defaults. No manual configuration is required.
+
+Default configuration:
+    /etc/system-update/config.conf
+
+Optional per-user override:
+    ~/.config/system-update/config.conf
+
+Main command:
+    system-update
+
+Logs:
+    ~/logs/latest_update.log
+
+Runtime state:
+    /var/lib/system-update/
+
+AUR updates are disabled by default. To enable them, set:
+    AUR_ENABLED=true
+in the configuration file.
+
+The package does NOT create a crontab entry automatically.
+To enable automatic periodic runs, set INSTALL_CRONTAB=true in the
+configuration file and run 'system-update' once.
+
+The package does NOT modify any existing shell, desktop, or cron
+configuration during installation.
+EOF
+}
+
+post_upgrade() {
+    cat <<'EOF'
+:: awesome-updater has been upgraded.
+
+If the package added new configuration keys and you previously modified
+/etc/system-update/config.conf, pacman may have created:
+    /etc/system-update/config.conf.pacnew
+
+The package works with its defaults. If you never modified the
+configuration file, no action is required.
+EOF
+}
+
+pre_remove() {
+    cat <<'EOF'
+:: Removing awesome-updater.
+
+The following are intentionally preserved:
+
+    /var/lib/system-update/       runtime state
+    ~/.config/system-update/      user configuration
+    ~/logs/                       user logs
+
+To remove them manually:
+
+    sudo rm -rf /var/lib/system-update
+    rm -rf ~/.config/system-update
+    rm -rf ~/logs
+
+If a crontab entry was created by the previous installation, remove it
+manually with:
+    crontab -e
+EOF
+}

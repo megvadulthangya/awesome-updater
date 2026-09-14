@@ -1,0 +1,45 @@
+.\" Manpage for system-update-notify
+.TH SYSTEM-UPDATE-NOTIFY 1 "2026" "awesome-updater 0.1.0" "User Commands"
+.SH NAME
+system-update-notify \- show system-update attention notifications
+.SH SYNOPSIS
+.B system-update-notify
+.RI [ MODE ]
+.SH DESCRIPTION
+.B system-update-notify
+reads the shared attention state written by
+.BR system-update (1)
+and displays notifications to the user.
+.PP
+The helper never modifies system configuration. It only reads the state
+file and prints or sends notifications.
+.SH MODES
+.TP
+.B \-\-tty
+Print an ANSI-formatted notification to stdout if attention is required.
+This is the default mode and is used by
+.IR /etc/profile.d/99-system-update.sh .
+.TP
+.B \-\-gui
+Send a single desktop notification using
+.BR notify-send (1)
+if attention is required. Silently does nothing if
+.B notify-send
+is unavailable.
+.TP
+.B \-\-gui-watch
+Watch the state file and send a desktop notification whenever the
+meaningful state changes. Intended to run inside a desktop session via
+XDG autostart.
+.TP
+.B \-\-help
+Show a short usage message and exit.
+.SH FILES
+.TP
+.I /var/lib/system-update/attention.state
+State file read by this helper.
+.SH SEE ALSO
+.BR system-update (1),
+.BR notify-send (1)
+.SH AUTHOR
+megvadulthangya

@@ -1,0 +1,191 @@
+#!/bin/bash
+#
+# system-update-notify
+#
+# Read the shared attention state and display notifications.
+#
+# Modes:
+#   --tty         Print an ANSI-formatted notification to stdout.
+#                 Safe to invoke from /etc/profile.d hooks.
+#   --gui         Send a single desktop notification using notify-send.
+#                 Silent no-op if notify-send is unavailable.
+#   --gui-watch   Watch the state file and send a desktop notification
+#                 whenever the meaningful state changes. Intended to run
+#                 inside a desktop session via XDG autostart.
+#
+# This script never modifies system configuration.
+
+set -uo pipefail
+
+export LC_ALL=C
+export LANG=C
+
+STATE_FILE="/var/lib/system-update/attention.state"
+
+MODE="${1:---tty}"
+
+# ----------------------------------------------------------------------------
+# State loading
+# ----------------------------------------------------------------------------
+
+read_state() {
+    NEEDS_ATTENTION=0
+    UPDATE_FAILED=0
+    REBOOT_REQUIRED=0
+    REBOOT_SCHEDULE_FAILED=0
+    PACNEW_COUNT=0
+    REASON=""
+    ACTION=""
+    DETAIL=""
+
+    [ -r "$STATE_FILE" ] || return 0
+
+    while IFS='=' read -r KEY VALUE; do
+        case "$KEY" in
+            NEEDS_ATTENTION)        NEEDS_ATTENTION="$VALUE" ;;
+            UPDATE_FAILED)          UPDATE_FAILED="$VALUE" ;;
+            REBOOT_REQUIRED)        REBOOT_REQUIRED="$VALUE" ;;
+            REBOOT_SCHEDULE_FAILED) REBOOT_SCHEDULE_FAILED="$VALUE" ;;
+            PACNEW_COUNT)           PACNEW_COUNT="$VALUE" ;;
+            REASON)                 REASON="$VALUE" ;;
+            ACTION)                 ACTION="$VALUE" ;;
+            DETAIL)                 DETAIL="$VALUE" ;;
+        esac
+    done < "$STATE_FILE"
+}
+
+state_signature() {
+    read_state
+    printf '%s\n' \
+        "$NEEDS_ATTENTION" \
+        "$UPDATE_FAILED" \
+        "$REBOOT_REQUIRED" \
+        "$REBOOT_SCHEDULE_FAILED" \
+        "$PACNEW_COUNT" \
+        "$REASON" \
+        "$ACTION" \
+        "$DETAIL" |
+    sha256sum 2>/dev/null |
+    awk '{print $1}'
+}
+
+# ----------------------------------------------------------------------------
+# TTY notification
+# ----------------------------------------------------------------------------
+
+tty_notification() {
+    read_state
+
+    [ "$NEEDS_ATTENTION" = "1" ] || return 0
+
+    local RED=''
+    local YELLOW=''
+    local NC=''
+
+    if [ -t 1 ]; then
+        RED='\033[1;31m'
+        YELLOW='\033[1;33m'
+        NC='\033[0m'
+    fi
+
+    echo
+    echo -e "${RED}============================================================${NC}"
+    echo -e "${RED}  SYSTEM UPDATE ATTENTION REQUIRED${NC}"
+    echo -e "${RED}============================================================${NC}"
+
+    [ -n "$REASON" ] && echo -e "  ${YELLOW}Reason:${NC} $REASON"
+    [ -n "$DETAIL" ] && echo -e "  ${YELLOW}Detail:${NC} $DETAIL"
+    [ -n "$ACTION" ] && echo -e "  ${YELLOW}Action:${NC} $ACTION"
+
+    echo
+    echo "  State: $STATE_FILE"
+    echo
+}
+
+# ----------------------------------------------------------------------------
+# GUI notification
+# ----------------------------------------------------------------------------
+
+gui_notification() {
+    read_state
+
+    [ "$NEEDS_ATTENTION" = "1" ] || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+
+    local title="System update attention required"
+    local body=""
+
+    if [ "$UPDATE_FAILED" = "1" ]; then
+        title="System update failed"
+    elif [ "$REBOOT_SCHEDULE_FAILED" = "1" ]; then
+        title="Kernel reboot scheduling failed"
+    elif [ "$REBOOT_REQUIRED" = "1" ]; then
+        title="System reboot required"
+    fi
+
+    body="$REASON"
+    [ -n "$DETAIL" ] && body="${body}"$'\n'"$DETAIL"
+    [ -n "$ACTION" ] && body="${body}"$'\n'"$ACTION"
+
+    notify-send \
+        --urgency=critical \
+        --app-name="System Update" \
+        "$title" \
+        "$body" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
+# GUI watcher
+# ----------------------------------------------------------------------------
+
+gui_watch() {
+    local previous_signature=""
+    local current_signature=""
+
+    while true; do
+        current_signature="$(state_signature 2>/dev/null || true)"
+
+        if [ -n "$current_signature" ] &&
+           [ "$current_signature" != "$previous_signature" ]; then
+            previous_signature="$current_signature"
+            read_state
+            if [ "$NEEDS_ATTENTION" = "1" ]; then
+                gui_notification
+            fi
+        fi
+
+        sleep 60
+    done
+}
+
+# ----------------------------------------------------------------------------
+# Dispatch
+# ----------------------------------------------------------------------------
+
+case "$MODE" in
+    --tty)
+        tty_notification
+        ;;
+    --gui)
+        gui_notification
+        ;;
+    --gui-watch)
+        gui_watch
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage: system-update-notify [MODE]
+
+Modes:
+    --tty         Print an ANSI-formatted notification to stdout.
+    --gui         Send a single desktop notification using notify-send.
+    --gui-watch   Watch the state file and notify on state change.
+    --help        Show this help.
+EOF
+        exit 0
+        ;;
+    *)
+        echo "Usage: system-update-notify [--tty|--gui|--gui-watch|--help]" >&2
+        exit 2
+        ;;
+esac

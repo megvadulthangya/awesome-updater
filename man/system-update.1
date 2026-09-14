@@ -1,0 +1,74 @@
+.\" Manpage for system-update
+.TH SYSTEM-UPDATE 1 "2026" "awesome-updater 0.1.0" "User Commands"
+.SH NAME
+system-update \- Manjaro unattended system updater
+.SH SYNOPSIS
+.B system-update
+.RI [ OPTION ]
+.SH DESCRIPTION
+.B system-update
+is the main executable provided by the
+.B awesome-updater
+package.
+It performs an unattended Manjaro system update, tracks kernel package
+changes, and schedules a one-time system reboot if required.
+.PP
+The command is intended to be run from the user's crontab. It is also safe
+to run interactively.
+.PP
+A complete default configuration is installed by the package at
+.IR /etc/system-update/config.conf .
+No manual setup is required for typical use.
+.SH OPTIONS
+.TP
+.B \-\-help
+Show a short usage message and exit.
+.TP
+.B \-\-version
+Show the version of
+.B system-update
+and exit.
+.TP
+.B \-\-status
+Print the current state (running kernel, pending reboot, attention
+required) without performing any update. Read-only.
+.SH CONFIGURATION
+Configuration is loaded from the following sources. Later sources override
+earlier ones:
+.IP "1." 4
+Built-in defaults compiled into
+.BR system-update .
+.IP "2." 4
+.IR /etc/system-update/config.conf
+installed by the package.
+.IP "3." 4
+.IR ~/.config/system-update/config.conf
+optional per-user overrides.
+.PP
+The configuration format is plain
+.IR KEY=VALUE .
+No shell code is executed.
+Unknown keys are ignored.
+.SH FILES
+.TP
+.I /etc/system-update/config.conf
+System-wide configuration installed by the package.
+.TP
+.I ~/.config/system-update/config.conf
+Optional per-user overrides.
+.TP
+.I /var/lib/system-update/attention.state
+Current attention state written by the updater.
+.TP
+.I /var/lib/system-update/kernel-reboot-needed
+Persistent kernel reboot state written by the updater.
+.TP
+.I ~/logs/latest_update.log
+Symlink to the most recent update log.
+.SH SEE ALSO
+.BR system-update-notify (1),
+.BR pacman (8),
+.BR systemd-run (1),
+.BR crontab (5)
+.SH AUTHOR
+megvadulthangya
