@@ -145,8 +145,10 @@ jobs:
           pacman -Qlp "$pkg" | grep -qE ' /usr/bin/system-update-notify$'
           pacman -Qlp "$pkg" | grep -qE ' /etc/profile.d/99-system-update.sh$'
           pacman -Qlp "$pkg" | grep -qE ' /etc/system-update/config.conf$'
-          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update.1$'
-          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update-notify.1$'
+
+          # makepkg compresses man pages to *.1.gz during packaging.
+          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update\.1\.gz$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update-notify\.1\.gz$'
 
           bsdtar -xOf "$pkg" .PKGINFO | grep -q '^backup = etc/system-update/config.conf$'
 
