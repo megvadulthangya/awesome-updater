@@ -15,12 +15,43 @@
 #
 # Configuration format is plain KEY=VALUE. No shell code is executed.
 #
+# Periodic execution is provided by the package-managed systemd timer
+# awesome-updater@<user>.timer. The package never modifies the user
+# crontab.
+#
 # See /usr/share/doc/awesome-updater/README.md for details.
 #
 
 set -uo pipefail
 
 SYSTEM_UPDATE_VERSION="@VERSION@"
+
+# ============================================================================
+# Environment fixup
+#
+# When invoked from a systemd system service with User= set, the HOME,
+# USER, LOGNAME and SHELL environment variables are not populated by
+# systemd. Derive HOME from the passwd database when it is missing or
+# does not point to a real directory. This is a no-op when the script is
+# invoked from a normal login shell or from the test harness.
+# ============================================================================
+
+if [ -z "${HOME:-}" ] || [ ! -d "${HOME:-}" ]; then
+    if command -v getent >/dev/null 2>&1; then
+        _derived_user="$(id -un 2>/dev/null || true)"
+        if [ -n "$_derived_user" ]; then
+            _derived_home="$(
+                getent passwd "$_derived_user" 2>/dev/null |
+                cut -d: -f6
+            )"
+            if [ -n "$_derived_home" ] && [ -d "$_derived_home" ]; then
+                HOME="$_derived_home"
+                export HOME
+            fi
+        fi
+        unset _derived_user _derived_home
+    fi
+fi
 
 # ============================================================================
 # Fixed paths
@@ -80,6 +111,11 @@ Usage:
 Configuration is loaded from:
     /etc/system-update/config.conf          (package default)
     ~/.config/system-update/config.conf     (optional user overrides)
+
+Periodic execution is provided by the package-managed systemd timer:
+    awesome-updater@<user>.timer
+
+The package does not modify the user crontab.
 
 Logs:
     ~/logs/latest_update.log
@@ -367,8 +403,6 @@ init_defaults() {
     CONFIG[AUR_ENABLED]=false
     CONFIG[AUTOMATIC_REBOOT]=true
     CONFIG[REBOOT_TIME]="02:15:00"
-    CONFIG[INSTALL_CRONTAB]=false
-    CONFIG[CRONTAB_SCHEDULE]="0 */6 * * *"
     CONFIG[NOTIFY_PROFILE_D]=true
     CONFIG[NOTIFY_WALL]=true
     CONFIG[NOTIFY_GUI]=true
@@ -413,8 +447,8 @@ parse_config_file() {
 
         case "$key" in
             OFFICIAL_UPDATES_ENABLED|AUR_ENABLED|AUTOMATIC_REBOOT|\
-            REBOOT_TIME|INSTALL_CRONTAB|CRONTAB_SCHEDULE|\
-            NOTIFY_PROFILE_D|NOTIFY_WALL|NOTIFY_GUI|LOG_RETENTION_DAYS)
+            REBOOT_TIME|NOTIFY_PROFILE_D|NOTIFY_WALL|NOTIFY_GUI|\
+            LOG_RETENTION_DAYS)
                 CONFIG["$key"]="$value"
                 ;;
             *)
@@ -430,14 +464,21 @@ load_config() {
 }
 
 # Configuration error handler. Called only after logging is initialized.
-# Uses sudo -n only, so this path can never block on an interactive prompt.
-# The persistent reboot state on disk is authoritative: an invalid
-# configuration must not falsely clear a pending reboot requirement.
+#
+# The state directory is ensured here so that an invalid configuration can
+# be persisted as a persistent attention state even on the very first
+# invocation. Only "sudo -n" is used, so this path can never block on an
+# interactive password prompt.
 config_error() {
     local msg="$1"
 
     echo "ERROR: Invalid configuration" >&2
     echo "$msg" >&2
+
+    if [ ! -d "$STATE_DIR" ]; then
+        sudo -n mkdir -p "$STATE_DIR" 2>/dev/null || true
+        sudo -n chmod 755 "$STATE_DIR" 2>/dev/null || true
+    fi
 
     if [ -d "$STATE_DIR" ]; then
         local tmp
@@ -477,80 +518,10 @@ validate_boolean() {
     esac
 }
 
-# Validate a single cron field. Accepts *, N, N-M, N/S, N-M/S, */S and
-# comma-separated lists of those. All numeric values must lie in [min, max].
-#
-# The field is split with `read -ra` under a local IFS so that no shell
-# pathname expansion can occur. A literal `*` in the field is accepted
-# as a valid element (it is a legal wildcard in every cron column).
-validate_cron_field() {
-    local field="$1" min="$2" max="$3" name="$4"
-    local item step lo hi val ok
-
-    [ -n "$field" ] || config_error "$name must not be empty"
-
-    local IFS=','
-    local -a items
-    read -ra items <<< "$field"
-
-    for item in "${items[@]}"; do
-        [ -n "$item" ] || config_error "$name contains an empty list element"
-        ok=0
-
-        # *
-        if [ "$ok" -eq 0 ] && [ "$item" = "*" ]; then
-            ok=1
-        fi
-
-        # */S
-        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^\*/([0-9]+)$ ]]; then
-            step="${BASH_REMATCH[1]}"
-            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
-            ok=1
-        fi
-
-        # N-M or N-M/S
-        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)-([0-9]+)(/([0-9]+))?$ ]]; then
-            lo="${BASH_REMATCH[1]}"
-            hi="${BASH_REMATCH[2]}"
-            step="${BASH_REMATCH[4]:-1}"
-            [ "$lo" -le "$hi" ] || config_error "$name has reversed range in '$item'"
-            [ "$lo" -ge "$min" ] || config_error "$name range below $min in '$item'"
-            [ "$hi" -le "$max" ] || config_error "$name range above $max in '$item'"
-            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
-            ok=1
-        fi
-
-        # N/S
-        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)/([0-9]+)$ ]]; then
-            val="${BASH_REMATCH[1]}"
-            step="${BASH_REMATCH[2]}"
-            [ "$val" -ge "$min" ] || config_error "$name value below $min in '$item'"
-            [ "$val" -le "$max" ] || config_error "$name value above $max in '$item'"
-            [ "$step" -ge 1 ] || config_error "$name has step < 1 in '$item'"
-            ok=1
-        fi
-
-        # N
-        if [ "$ok" -eq 0 ] && [[ "$item" =~ ^([0-9]+)$ ]]; then
-            val="${BASH_REMATCH[1]}"
-            [ "$val" -ge "$min" ] || config_error "$name value below $min in '$item'"
-            [ "$val" -le "$max" ] || config_error "$name value above $max in '$item'"
-            ok=1
-        fi
-
-        if [ "$ok" -eq 0 ]; then
-            config_error "$name has invalid element '$item'"
-        fi
-    done
-    return 0
-}
-
 validate_config() {
     validate_boolean OFFICIAL_UPDATES_ENABLED
     validate_boolean AUR_ENABLED
     validate_boolean AUTOMATIC_REBOOT
-    validate_boolean INSTALL_CRONTAB
     validate_boolean NOTIFY_PROFILE_D
     validate_boolean NOTIFY_WALL
     validate_boolean NOTIFY_GUI
@@ -559,24 +530,6 @@ validate_config() {
     if ! [[ "$t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$ ]]; then
         config_error "REBOOT_TIME must be a valid 24-hour time in HH:MM:SS format (configured value: '$t')"
     fi
-
-    local s="${CONFIG[CRONTAB_SCHEDULE]}"
-    if [ -z "$s" ]; then
-        config_error "CRONTAB_SCHEDULE must not be empty"
-    fi
-    local n
-    n="$(printf '%s\n' "$s" | awk '{print NF}')"
-    if [ "$n" -ne 5 ]; then
-        config_error "CRONTAB_SCHEDULE must contain exactly 5 fields (configured value: '$s')"
-    fi
-
-    local f_min f_hour f_dom f_mon f_dow
-    read -r f_min f_hour f_dom f_mon f_dow <<< "$s"
-    validate_cron_field "$f_min"  0 59 "CRONTAB_SCHEDULE minute"
-    validate_cron_field "$f_hour" 0 23 "CRONTAB_SCHEDULE hour"
-    validate_cron_field "$f_dom"  1 31 "CRONTAB_SCHEDULE day-of-month"
-    validate_cron_field "$f_mon"  1 12 "CRONTAB_SCHEDULE month"
-    validate_cron_field "$f_dow"  0 7  "CRONTAB_SCHEDULE day-of-week"
 
     local l="${CONFIG[LOG_RETENTION_DAYS]}"
     if ! [[ "$l" =~ ^[0-9]+$ ]]; then
@@ -678,6 +631,9 @@ EOF
 
 # ============================================================================
 # Legacy migration warning
+#
+# Read-only: this function only prints warnings. It never modifies the
+# user crontab, never writes to it, and never removes legacy files.
 # ============================================================================
 
 check_legacy_migration() {
@@ -709,73 +665,33 @@ check_legacy_migration() {
         echo
     fi
 
-    if command_exists crontab; then
-        if crontab -l 2>/dev/null | grep -qF "$LEGACY_SCRIPT_PATH"; then
-            echo "WARNING: The user crontab references the legacy path:"
-            echo "  $LEGACY_SCRIPT_PATH"
-            echo "Update it to use $SCRIPT_PATH."
-            echo
-        fi
-    fi
-}
-
-# ============================================================================
-# Crontab handling
-# ============================================================================
-
-# Remove only the updater's own crontab entries from the given text.
-# A line is removed only when the command field is exactly $SCRIPT_PATH or
-# $LEGACY_SCRIPT_PATH, so entries referencing the notification helper or
-# any other command are preserved.
-filter_updater_crontab() {
-    awk -v new="$SCRIPT_PATH" -v old="$LEGACY_SCRIPT_PATH" '
-        {
-            if (NF == 0) { print; next }
-            if ($0 ~ /^[[:space:]]*#/) { print; next }
-            # cron environment assignment, e.g. MAILTO=user@host
-            if ($1 ~ /=/) { print; next }
-            # @-style entry: command is field 2
-            if ($1 ~ /^@/) {
-                if ($2 == new || $2 == old) { next }
-                print; next
-            }
-            # standard 5-field entry: command is field 6
-            if (NF >= 6 && ($6 == new || $6 == old)) { next }
-            print
-        }
-    '
-}
-
-handle_crontab() {
-    [ "${CONFIG[INSTALL_CRONTAB]}" = "true" ] || return 0
-
     if ! command_exists crontab; then
-        echo "WARNING: crontab command not available; cannot install entry."
-        return 1
-    fi
-
-    local schedule="${CONFIG[CRONTAB_SCHEDULE]}"
-    local entry="$schedule $SCRIPT_PATH >/dev/null 2>&1"
-
-    local existing filtered new_crontab
-    existing="$(crontab -l 2>/dev/null || true)"
-
-    filtered="$(printf '%s\n' "$existing" | filter_updater_crontab || true)"
-
-    if [ -n "$filtered" ]; then
-        new_crontab="${filtered}"$'\n'"${entry}"
-    else
-        new_crontab="${entry}"
-    fi
-
-    if printf '%s\n' "$new_crontab" | crontab -; then
-        echo "Crontab entry installed:"
-        echo "  $entry"
         return 0
     fi
 
-    echo "ERROR: Failed to install crontab entry."
-    return 1
+    local ct
+    ct="$(crontab -l 2>/dev/null || true)"
+    if [ -z "$ct" ]; then
+        return 0
+    fi
+
+    if printf '%s\n' "$ct" | grep -qF "$LEGACY_SCRIPT_PATH"; then
+        echo "WARNING: The user crontab references the legacy path:"
+        echo "  $LEGACY_SCRIPT_PATH"
+        echo "The package now uses a systemd timer instead of cron."
+        echo "The legacy crontab entry is NOT modified automatically."
+        echo "Review and remove it manually with: crontab -e"
+        echo
+    fi
+
+    if printf '%s\n' "$ct" | grep -qF "$SCRIPT_PATH"; then
+        echo "WARNING: The user crontab references the updater path:"
+        echo "  $SCRIPT_PATH"
+        echo "The package now uses a systemd timer instead of cron."
+        echo "The crontab entry is NOT modified automatically."
+        echo "Review and remove it manually with: crontab -e"
+        echo
+    fi
 }
 
 # ============================================================================
@@ -877,13 +793,33 @@ main_update() {
     fi
 
     # --- Logging ---------------------------------------------------------
-    if ! mkdir -p "$LOG_DIR"; then
-        echo "ERROR: Cannot create log directory: $LOG_DIR"
-        exit 1
+    # Logging is best-effort. Failure to set up file logging must never
+    # prevent the updater from running: the systemd journal and stderr
+    # remain available as fallbacks.
+    LOG_FILE=""
+
+    if mkdir -p "$LOG_DIR" 2>/dev/null; then
+        _candidate="$LOG_DIR/system-update_$(date +%Y-%m-%d_%H-%M-%S).log"
+        if ( : >> "$_candidate" ) 2>/dev/null; then
+            LOG_FILE="$_candidate"
+        else
+            echo "WARNING: Cannot write to log file: $_candidate" >&2
+        fi
+        unset _candidate
+    else
+        echo "WARNING: Cannot create log directory: $LOG_DIR" >&2
     fi
 
-    LOG_FILE="$LOG_DIR/system-update_$(date +%Y-%m-%d_%H-%M-%S).log"
-    exec > >(tee -a "$LOG_FILE") 2>&1
+    if [ -n "$LOG_FILE" ]; then
+        # Duplicate stdout/stderr to the log file. A dead tee pipe is
+        # not fatal for the updater: the effect of a full disk is that
+        # further writes to the pipe simply fail, and the runtime keeps
+        # running with reduced visibility until the logging sink is
+        # restored on a subsequent invocation.
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    else
+        echo "WARNING: File logging disabled; output goes to stdout/stderr only." >&2
+    fi
 
     echo "============================================================"
     echo "Manjaro system update started"
@@ -932,14 +868,6 @@ main_update() {
 
     # --- Legacy migration warning ---------------------------------------
     check_legacy_migration
-
-    # --- Crontab --------------------------------------------------------
-    echo
-    echo "Crontab handling..."
-    local cron_install_failed=0
-    if ! handle_crontab; then
-        cron_install_failed=1
-    fi
 
     # --- Kernel detection -----------------------------------------------
     echo
@@ -1228,7 +1156,6 @@ main_update() {
     fi
 
     # --- Kernel change detection ----------------------------------------
-    KERNEL_PACKAGE_CHANGED=0
     RUNNING_KERNEL_PACKAGE_CHANGED=0
     TARGET_KERNEL_VERSION=""
 
@@ -1246,8 +1173,6 @@ main_update() {
             echo "  Before : $before_ver"
             echo "  After  : $after_ver"
 
-            KERNEL_PACKAGE_CHANGED=1
-
             if [ "$pkg" = "$RUNNING_KERNEL_PKG" ]; then
                 RUNNING_KERNEL_PACKAGE_CHANGED=1
                 TARGET_KERNEL_VERSION="$after_ver"
@@ -1261,7 +1186,6 @@ main_update() {
             echo "New kernel package installed:"
             echo "  Package: $pkg"
             echo "  Version: ${KERNEL_AFTER[$pkg]}"
-            KERNEL_PACKAGE_CHANGED=1
         fi
     done
 
@@ -1440,30 +1364,11 @@ main_update() {
     local action=""
     local detail=""
 
-    if [ "$cron_install_failed" -eq 1 ]; then
+    if [ "$update_failed" -eq 1 ]; then
         attention=1
-        update_failed=1
-        reason="Automatic cron installation failed"
-        action="Check the user crontab and install the intended entry manually"
-    fi
-
-    if [ "$update_failed" -eq 1 ] && [ "$cron_install_failed" -ne 1 ]; then
-        attention=1
-        if [ -n "$reason" ]; then
-            reason="$reason | Official system update failed"
-        else
-            reason="Official system update failed"
-        fi
-        if [ -n "$action" ]; then
-            action="$action | Review the system-update log"
-        else
-            action="Review the system-update log"
-        fi
-        if [ -n "$detail" ]; then
-            detail="$detail | pacman -Syu returned a non-zero status"
-        else
-            detail="pacman -Syu returned a non-zero status"
-        fi
+        reason="Official system update failed"
+        action="Review the system-update log"
+        detail="pacman -Syu returned a non-zero status"
     fi
 
     if [ "$REBOOT_SCHEDULE_FAILED" -eq 1 ]; then
@@ -1621,29 +1526,35 @@ main_update() {
     fi
 
     # --- Log rotation ----------------------------------------------------
-    ln -sfn "$LOG_FILE" "$LATEST_LOG"
+    if [ -n "$LOG_FILE" ]; then
+        ln -sfn "$LOG_FILE" "$LATEST_LOG"
 
-    echo
-    echo "Cleaning update logs older than ${CONFIG[LOG_RETENTION_DAYS]} days..."
+        echo
+        echo "Cleaning update logs older than ${CONFIG[LOG_RETENTION_DAYS]} days..."
 
-    find "$LOG_DIR" \
-        -name "system-update_*.log" \
-        -type f \
-        -mtime +"${CONFIG[LOG_RETENTION_DAYS]}" \
-        -delete 2>/dev/null || true
+        find "$LOG_DIR" \
+            -name "system-update_*.log" \
+            -type f \
+            -mtime +"${CONFIG[LOG_RETENTION_DAYS]}" \
+            -delete 2>/dev/null || true
 
-    if [ -L "$LATEST_LOG" ] && [ ! -e "$LATEST_LOG" ]; then
-        rm -f "$LATEST_LOG"
+        if [ -L "$LATEST_LOG" ] && [ ! -e "$LATEST_LOG" ]; then
+            rm -f "$LATEST_LOG"
+        fi
+
+        echo "Log cleanup completed."
     fi
-
-    echo "Log cleanup completed."
 
     echo
     echo "============================================================"
     echo "System update completed"
     echo "Date: $(date)"
-    echo "Log file: $LOG_FILE"
-    echo "Latest log: $LATEST_LOG"
+    if [ -n "$LOG_FILE" ]; then
+        echo "Log file: $LOG_FILE"
+        echo "Latest log: $LATEST_LOG"
+    else
+        echo "Log file: (not available; see stdout/stderr or the journal)"
+    fi
     echo "============================================================"
 
     sleep 0.1

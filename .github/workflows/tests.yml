@@ -34,6 +34,7 @@ jobs:
           bash -n system-update
           bash -n system-update-notify
           bash -n profile.d/99-system-update.sh
+          bash -n awesome-updater.install
           for f in tests/run-tests.sh tests/lib/*.sh tests/test-*.sh tests/mocks/*; do
             bash -n "$f"
           done
@@ -48,7 +49,8 @@ jobs:
           shellcheck --severity=warning --exclude=SC2034 \
             system-update \
             system-update-notify \
-            profile.d/99-system-update.sh
+            profile.d/99-system-update.sh \
+            awesome-updater.install
 
       - name: ShellCheck test infrastructure
         run: |
@@ -103,9 +105,6 @@ jobs:
           #
           # systemd-sysvcompat is included explicitly because the Manjaro
           # build image ships it pinned to the image's systemd version.
-          # Without upgrading both together, pacman refuses to install a
-          # newer systemd ("installing systemd breaks dependency
-          # 'systemd=...' required by systemd-sysvcompat").
           pacman -Sy --noconfirm --needed \
             base-devel \
             libarchive \
@@ -113,6 +112,7 @@ jobs:
             bash \
             coreutils \
             inetutils \
+            kernel-modules-hook \
             pacman \
             systemd \
             findutils \
@@ -145,12 +145,15 @@ jobs:
           pacman -Qlp "$pkg" | grep -qE ' /usr/bin/system-update-notify$'
           pacman -Qlp "$pkg" | grep -qE ' /etc/profile.d/99-system-update.sh$'
           pacman -Qlp "$pkg" | grep -qE ' /etc/system-update/config.conf$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/lib/systemd/system/awesome-updater@\.service$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/lib/systemd/system/awesome-updater@\.timer$'
 
           # makepkg compresses man pages to *.1.gz during packaging.
           pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update\.1\.gz$'
           pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update-notify\.1\.gz$'
 
           bsdtar -xOf "$pkg" .PKGINFO | grep -q '^backup = etc/system-update/config.conf$'
+          bsdtar -xOf "$pkg" .PKGINFO | grep -q '^depend = kernel-modules-hook$'
 
       - name: Confirm @VERSION@ placeholder was substituted
         run: |

@@ -14,8 +14,6 @@ on:
 jobs:
   shellcheck:
     name: ShellCheck (Manjaro)
-    # The host runner is only the CI worker. The project is validated
-    # inside the Manjaro container below.
     runs-on: ubuntu-latest
     container:
       image: manjarolinux/build:latest
@@ -38,7 +36,8 @@ jobs:
           shellcheck --severity=warning --exclude=SC2034 \
             system-update \
             system-update-notify \
-            profile.d/99-system-update.sh
+            profile.d/99-system-update.sh \
+            awesome-updater.install
 
       - name: ShellCheck test infrastructure
         run: |

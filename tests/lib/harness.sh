@@ -126,10 +126,9 @@ sandbox_prepare() {
     export MOCK_LOG="$SANDBOX_MOCK_LOG"
     export MOCK_STATE_DIR="$SANDBOX/mock-state"
     export MOCK_SUDO_N_OK=0
-    # The pending-reboot check calls `pacman -Q <pkg>`. Common Manjaro
-    # kernel package names are marked as installed so that a
-    # kernel-reboot-needed file produced by a test is not treated as stale
-    # before the failure branch under test is reached.
+    # Common Manjaro kernel package names are marked as installed so that
+    # a kernel-reboot-needed file produced by a test is not treated as
+    # stale before the failure branch under test is reached.
     export MOCK_PACMAN_INSTALLED="linux612 linux618 linux619 linux66"
     export MOCK_PACMAN_Q_FILE=""
     export MOCK_PACMAN_Q_FILE_1=""
@@ -138,6 +137,7 @@ sandbox_prepare() {
     export MOCK_PACMAN_SYU_EXIT=0
     export MOCK_PACMAN_S_EXIT=0
     export MOCK_SYSTEMCTL_ACTIVE_UNITS=""
+    export MOCK_SYSTEMCTL_ENABLED_TIMERS=""
     export MOCK_SYSTEMD_RUN_EXIT=0
     export MOCK_MHWD_OUTPUT=""
     export MOCK_UNAME_R="6.18.50-1-MANJARO"
@@ -151,6 +151,7 @@ sandbox_prepare() {
     export MOCK_VERCMP_EXIT=""
     export MOCK_GIT_EXIT=0
     export MOCK_MAKEPKG_EXIT=0
+    export MOCK_PASSWD_FILE=""
     export SANDBOX SANDBOX_HOME SANDBOX_PATH SANDBOX_MOCK_LOG
 }
 
@@ -174,11 +175,6 @@ _prepare_script() {
 
 # ---------------------------------------------------------------------------
 # Config writers
-#
-# These accept the entire configuration content as a single argument. They
-# MUST NOT read from stdin: on CI runners the test process's stdin is not
-# a terminal and may carry unexpected bytes, which previously caused the
-# sandbox config to be populated with garbage.
 # ---------------------------------------------------------------------------
 
 write_config() {
@@ -217,6 +213,19 @@ setup_pacman_before_after() {
     printf '%s\n' "$after" > "$fa"
     export MOCK_PACMAN_Q_FILE_1="$fb"
     export MOCK_PACMAN_Q_FILE_2="$fa"
+}
+
+# Create a mock passwd file inside the sandbox and point MOCK_PASSWD_FILE
+# at it. Any user listed here is considered to exist by the mocked id and
+# getent.
+write_mock_passwd() {
+    local target="$1"
+    local home="$2"
+    local pf="$SANDBOX/passwd"
+    mkdir -p "$home"
+    printf '%s:x:1001:1001::%s:/bin/bash\n' "$target" "$home" > "$pf"
+    printf 'root:x:0:0::/root:/bin/bash\n' >> "$pf"
+    export MOCK_PASSWD_FILE="$pf"
 }
 
 # ---------------------------------------------------------------------------

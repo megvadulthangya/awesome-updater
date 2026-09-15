@@ -1,0 +1,21 @@
+[Unit]
+Description=Manjaro system updater (awesome-updater) for user %i
+Documentation=man:system-update(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+# systemd system services do not export HOME, USER, LOGNAME, SHELL or a
+# user PATH even when User= is set. Set the values that can be expressed
+# statically here. HOME is derived by the runtime from the passwd
+# database when it is missing or does not point to a real directory.
+Environment="USER=%i"
+Environment="LOGNAME=%i"
+Environment="SHELL=/bin/bash"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/system-update
+# Do not restart on failure: the runtime records persistent attention
+# state that is reconciled on the next scheduled run.

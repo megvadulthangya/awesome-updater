@@ -3,7 +3,8 @@
 A Manjaro-focused unattended system updater with persistent kernel reboot
 handling and user-facing notifications.
 
-The `awesome-updater` package provides the `system-update` command.
+The `awesome-updater` package provides the `system-update` command and a
+package-managed systemd timer that runs it periodically as a normal user.
 
 ## Scope
 
@@ -16,30 +17,32 @@ mechanism. `/etc/update-motd.d/` is out of scope.
 
 ## Installation
 
-Install the package. No manual configuration is required.
+Install the package. When the installer can identify the invoking normal
+user (for example via `SUDO_USER` when installing with `sudo`, or via
+`PKEXEC_UID`/`DOAS_USER` for `pkexec`/`doas`), periodic updater execution
+is activated automatically:
 
-The package installs a working default configuration at:
+    sudo pacman -S awesome-updater
 
-    /etc/system-update/config.conf
+After installation, a systemd timer named
+`awesome-updater@<user>.timer` runs the updater every six hours, at
+00:00, 06:00, 12:00 and 18:00 local time.
 
-The defaults are safe and suitable for a fresh Manjaro system.
+    systemctl list-timers 'awesome-updater@*'
 
-If a previous manual installation of the original single-script version
-is still present on disk, read the migration section below before
-installing.
+The user crontab is **not** modified by this package.
 
-## Commands
-
-    system-update                 # run the update
-    system-update --help
-    system-update --version
-    system-update --status        # read-only state report
-
-    system-update-notify --tty
-    system-update-notify --gui
-    system-update-notify --gui-watch
+If the invoking normal user cannot be determined (for example when the
+package is installed directly by `root` without `sudo`), the package still
+installs successfully and prints the exact `systemctl enable` command
+needed to activate the periodic updater manually. No root updater
+instance is ever created.
 
 ## Configuration
+
+Configuration is optional. The defaults are safe and suitable for a fresh
+Manjaro system. If you want to override individual settings, create the
+user override file and include only the keys you want to change.
 
 Configuration is loaded in the following order. Later sources override
 earlier ones:
@@ -50,10 +53,6 @@ earlier ones:
             ↓
     ~/.config/system-update/config.conf     (optional user overrides)
 
-The user override file is optional and normally does not exist. To
-override a setting, create the file and include only the keys you want to
-change.
-
 Format: `KEY=VALUE`. No shell code is executed.
 
 Supported keys:
@@ -62,8 +61,6 @@ Supported keys:
     AUR_ENABLED
     AUTOMATIC_REBOOT
     REBOOT_TIME
-    INSTALL_CRONTAB
-    CRONTAB_SCHEDULE
     NOTIFY_PROFILE_D
     NOTIFY_WALL
     NOTIFY_GUI
@@ -74,6 +71,55 @@ Supported keys:
 interactive login. The profile hook reads this key directly from the
 configuration hierarchy at login time; the updater does not rewrite the
 package-owned hook.
+
+## Scheduler
+
+Periodic execution is provided by a systemd system timer. The package
+enables exactly one instance, keyed to the target normal user. The
+underlying service is:
+
+    /usr/lib/systemd/system/awesome-updater@.service
+    /usr/lib/systemd/system/awesome-updater@.timer
+
+The timer's default cadence is `*-*-* 00,06,12,18:00:00` with
+`Persistent=true`.
+
+Useful commands:
+
+    systemctl list-timers 'awesome-updater@*'
+    systemctl status 'awesome-updater@<user>.timer'
+    systemctl status 'awesome-updater@<user>.service'
+    journalctl -u 'awesome-updater@<user>.service'
+
+Override the schedule without editing the package-managed unit file:
+
+    systemctl edit awesome-updater@<user>.timer
+
+Enable a specific user's timer manually (for example, if automatic user
+discovery could not determine the invoking normal user):
+
+    sudo systemctl enable --now awesome-updater@<username>.timer
+
+Do not use `root` as the username. The updater refuses to run as root.
+
+## Commands
+
+    system-update                 # run the update manually
+    system-update --help
+    system-update --version
+    system-update --status        # read-only state report
+
+    system-update-notify --tty
+    system-update-notify --gui
+    system-update-notify --gui-watch
+
+## Passwordless sudo
+
+The updater is intended to run as a normal user with passwordless sudo
+available for the specific commands it invokes. The updater performs an
+explicit `sudo -n true` preflight check and refuses to continue if
+passwordless sudo is not available. The package does not attempt to
+handle interactive sudo prompts.
 
 ## AUR support
 
@@ -96,30 +142,30 @@ AUR if missing and runs `yay -Sua`.
 ## Automatic kernel reboot
 
 When a kernel package that provides the currently running kernel is
-updated, the script records a persistent reboot requirement.
+updated, the script records a persistent reboot requirement in:
+
+    /var/lib/system-update/kernel-reboot-needed
 
 With `AUTOMATIC_REBOOT=true` (default), a one-time transient systemd
 timer is scheduled for the next occurrence of `REBOOT_TIME` (default
-`02:15:00` local time). The timer is created with `systemd-run` and is not
-persistent across reboots.
+`02:15:00` local time). The timer is created with `systemd-run` and is
+not persistent across reboots; it is independent of the periodic updater
+timer and is never used to reboot the machine on a schedule.
 
-With `AUTOMATIC_REBOOT=false`, no reboot is scheduled. The attention state
-and login notifications report that a manual reboot is required.
+With `AUTOMATIC_REBOOT=false`, no reboot is scheduled. The attention
+state and login notifications report that a manual reboot is required.
 
-## Periodic execution
+The reboot requirement is verified at each subsequent run: if the target
+kernel is already running, the persistent reboot flag is cleared; if the
+machine was rebooted before the scheduled timer fired, the target kernel
+is detected as running and no unnecessary reboot is performed.
 
-The updater is designed to be run from the user's crontab.
+## Kernel modules
 
-By default the package does **not** modify the crontab. To let the script
-install its own entry, set in the configuration:
-
-    INSTALL_CRONTAB=true
-    CRONTAB_SCHEDULE="0 */6 * * *"
-
-Then run `system-update` once. The script adds (or updates) a crontab
-entry pointing at `/usr/bin/system-update`. Existing entries that invoke
-the notification helper or any other command are preserved. Only entries
-whose command is exactly the updater path are replaced.
+The package depends on `kernel-modules-hook`. This keeps kernel modules
+available on the currently running kernel until the machine actually
+transitions to the new kernel, so that services do not lose their module
+dependencies between a kernel upgrade and the following reboot.
 
 ## Notifications
 
@@ -141,7 +187,9 @@ Three notification channels are available:
     ~/logs/latest_update.log
     ~/logs/system-update_YYYY-MM-DD_HH-MM-SS.log
 
-Logs older than `LOG_RETENTION_DAYS` are removed automatically.
+Logs older than `LOG_RETENTION_DAYS` are removed automatically. If the
+home directory is not writable, file logging is disabled with a warning
+and the updater continues; systemd captures the output in the journal.
 
 ## Runtime state
 
@@ -150,12 +198,19 @@ Logs older than `LOG_RETENTION_DAYS` are removed automatically.
 
 The state directory is fixed and is not configurable.
 
+## `.pacnew` files
+
+The updater detects and reports `.pacnew` files under `/etc`. It never
+merges them and never deletes them. Merging is the administrator's
+decision.
+
 ## Migration from an older manual installation
 
 A previous manual installation of the original single-script version may
-have created files that are not owned by any pacman package. Because
-pacman refuses to overwrite unowned files, the first package installation
-can fail unless those files are removed first.
+have created files that are not owned by any pacman package, or a user
+crontab entry pointing at the updater. Because pacman refuses to
+overwrite unowned files, the first package installation can fail unless
+those files are removed first.
 
 The paths to check are:
 
@@ -170,8 +225,9 @@ precedes `/usr/bin` in `PATH`. The third conflicts directly with the
 fourth conflicts with the package-managed default configuration file.
 
 The package refuses to delete any of these files automatically. The
-`pre_install` scriptlet of the package prints a non-destructive notice
-listing every unowned conflicting path it detects.
+`pre_install` scriptlet prints a non-destructive notice listing every
+unowned conflicting path it detects, and the runtime prints a similar
+warning for the `/usr/local/bin` files.
 
 To complete the migration manually:
 
@@ -180,8 +236,9 @@ To complete the migration manually:
     sudo rm -f /etc/profile.d/99-system-update.sh
     sudo rm -f /etc/system-update/config.conf
 
-Then install the package. If a crontab entry still references the legacy
-path, update it to `/usr/bin/system-update`.
+If a user crontab entry still references `/usr/bin/system-update` or
+`/usr/local/bin/system-update`, remove it manually with `crontab -e`.
+The package will warn about it but will not touch the crontab.
 
 ## License
 

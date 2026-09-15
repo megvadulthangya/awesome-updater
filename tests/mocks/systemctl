@@ -10,13 +10,24 @@ fi
 sub="${1:-}"
 [ "$#" -gt 0 ] && shift
 
-if [ "$sub" = "is-active" ]; then
-    [ "${1:-}" = "--quiet" ] && shift
-    unit="${1:-}"
-    for u in ${MOCK_SYSTEMCTL_ACTIVE_UNITS:-}; do
-        [ "$u" = "$unit" ] && exit 0
-    done
-    exit 3
-fi
-
-exit 0
+case "$sub" in
+    is-active)
+        [ "${1:-}" = "--quiet" ] && shift
+        unit="${1:-}"
+        for u in ${MOCK_SYSTEMCTL_ACTIVE_UNITS:-}; do
+            [ "$u" = "$unit" ] && exit 0
+        done
+        exit 3
+        ;;
+    list-unit-files)
+        # Consumes any "--type=timer" / "--no-legend" arguments and returns
+        # the configured enabled timers in the same format systemd uses.
+        for t in ${MOCK_SYSTEMCTL_ENABLED_TIMERS:-}; do
+            printf '%s enabled\n' "$t"
+        done
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Configuration hierarchy, validation, and error handling.
+# Configuration hierarchy and validation.
 
 : "${TESTS_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # shellcheck source=lib/harness.sh
@@ -56,28 +56,6 @@ test_invalid_reboot_time_aborts() {
     assert_mock_not_called "pacman -Syu" || return 1
 }
 
-test_invalid_cron_schedule_aborts() {
-    sandbox_prepare
-    _common_setup
-    write_config "CRONTAB_SCHEDULE=nonsense here"
-
-    run_updater || return 1
-    assert_exit 1 || return 1
-    assert_output_contains "CRONTAB_SCHEDULE" || return 1
-    assert_mock_not_called "pacman -Syu" || return 1
-}
-
-test_invalid_cron_field_range_aborts() {
-    sandbox_prepare
-    _common_setup
-    write_config "CRONTAB_SCHEDULE=99 99 99 99 99"
-
-    run_updater || return 1
-    assert_exit 1 || return 1
-    assert_output_contains "CRONTAB_SCHEDULE" || return 1
-    assert_mock_not_called "pacman -Syu" || return 1
-}
-
 test_invalid_log_retention_aborts() {
     sandbox_prepare
     _common_setup
@@ -109,11 +87,20 @@ test_quoted_values_are_accepted() {
     assert_mock_called "pacman -Syu --noconfirm" || return 1
 }
 
-# The specification requires that an invalid configuration can never
-# block on an interactive sudo password prompt. Either a prior
-# "sudo -n true" probe or a strictly non-interactive "sudo -n ..." call
-# satisfies this. The current runtime uses the latter, so this test
-# asserts the invariant itself, not the specific mechanism.
+test_removed_crontab_keys_are_ignored() {
+    sandbox_prepare
+    _common_setup
+    # Legacy keys are no longer recognized. They must be ignored, not
+    # fatal, and must not cause any crontab modification.
+    write_config $'INSTALL_CRONTAB=true\nCRONTAB_SCHEDULE=0 */6 * * *\nAUTOMATIC_REBOOT=false'
+
+    run_updater || return 1
+    assert_exit 0 || return 1
+    assert_output_contains "Ignoring unknown configuration key 'INSTALL_CRONTAB'" || return 1
+    assert_output_contains "Ignoring unknown configuration key 'CRONTAB_SCHEDULE'" || return 1
+    assert_mock_not_called "crontab -" || return 1
+}
+
 test_config_error_never_prompts_for_sudo() {
     sandbox_prepare
     _common_setup
@@ -134,11 +121,10 @@ t test_user_config_overrides_system_config
 t test_system_config_disables_official
 t test_invalid_boolean_aborts_before_pacman
 t test_invalid_reboot_time_aborts
-t test_invalid_cron_schedule_aborts
-t test_invalid_cron_field_range_aborts
 t test_invalid_log_retention_aborts
 t test_unknown_keys_are_ignored
 t test_quoted_values_are_accepted
+t test_removed_crontab_keys_are_ignored
 t test_config_error_never_prompts_for_sudo
 
 summary

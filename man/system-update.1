@@ -13,8 +13,9 @@ package.
 It performs an unattended Manjaro system update, tracks kernel package
 changes, and schedules a one-time system reboot if required.
 .PP
-The command is intended to be run from the user's crontab. It is also safe
-to run interactively.
+The command is normally invoked by the package-managed systemd timer
+.B awesome-updater@\fIuser\fB.timer
+as a normal user. It is also safe to run interactively.
 .PP
 A complete default configuration is installed by the package at
 .IR /etc/system-update/config.conf .
@@ -49,6 +50,78 @@ The configuration format is plain
 .IR KEY=VALUE .
 No shell code is executed.
 Unknown keys are ignored.
+.SH SCHEDULER
+Periodic execution is provided by the package-managed systemd timer:
+.PP
+.RS 4
+.B awesome-updater@\fIuser\fB.timer
+.RE
+.PP
+The timer is enabled automatically at package installation time when the
+invoking normal user can be determined (via
+.BR SUDO_USER ,
+.B PKEXEC_UID
+or
+.BR DOAS_USER ).
+The default schedule is
+.IR "*-*-* 00,06,12,18:00:00"
+with
+.IR Persistent=true .
+.PP
+The timer can be inspected with:
+.PP
+.RS 4
+systemctl list-timers 'awesome-updater@*'
+.RE
+.PP
+and its schedule can be overridden without editing the package-owned unit
+file by using:
+.PP
+.RS 4
+systemctl edit awesome-updater@\fIuser\fB.timer
+.RE
+.PP
+If no normal user can be determined automatically, the package prints the
+exact
+.B "systemctl enable"
+command needed to activate a specific instance manually. The package
+never creates a root updater instance.
+.PP
+The package does
+.B not
+modify the user crontab. The user crontab is unrelated to the periodic
+updater.
+.SH PASSWORDLESS SUDO
+The updater expects passwordless sudo to be available for the specific
+commands it invokes. It performs an explicit
+.B "sudo -n true"
+preflight check and refuses to continue if passwordless sudo is not
+available. It never prompts for a password.
+.SH AUR
+AUR updates are disabled by default
+.RB ( AUR_ENABLED=false ).
+The AUR branch is activated only when
+.B AUR_ENABLED=true
+is set in the configuration. See
+.IR /etc/system-update/config.conf .
+.SH KERNEL REBOOT
+When the package providing the currently running kernel is updated, a
+persistent reboot requirement is recorded in
+.IR /var/lib/system-update/kernel-reboot-needed .
+.PP
+With
+.B AUTOMATIC_REBOOT=true
+(the default), a one-time transient systemd timer is created via
+.BR systemd-run
+for the next occurrence of
+.IR REBOOT_TIME .
+This timer is separate from
+.B awesome-updater@\fIuser\fB.timer
+and is never used for periodic updates.
+.PP
+If the machine is rebooted into the target kernel before the timer fires,
+the reboot requirement is cleared on the next run without any unnecessary
+reboot.
 .SH FILES
 .TP
 .I /etc/system-update/config.conf
@@ -65,10 +138,19 @@ Persistent kernel reboot state written by the updater.
 .TP
 .I ~/logs/latest_update.log
 Symlink to the most recent update log.
+.TP
+.I /usr/lib/systemd/system/awesome-updater@.service
+Template unit that runs
+.B system-update
+as a normal user.
+.TP
+.I /usr/lib/systemd/system/awesome-updater@.timer
+Template timer that schedules the periodic updater.
 .SH SEE ALSO
 .BR system-update-notify (1),
 .BR pacman (8),
 .BR systemd-run (1),
-.BR crontab (5)
+.BR systemctl (1),
+.BR systemd.timer (5)
 .SH AUTHOR
 megvadulthangya

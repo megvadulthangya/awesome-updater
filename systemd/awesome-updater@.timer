@@ -1,0 +1,18 @@
+[Unit]
+Description=Periodic Manjaro system updater (awesome-updater) for user %i
+Documentation=man:system-update(1)
+
+[Timer]
+# Matches the historical "0 */6 * * *" cadence expressed in local time.
+# This is the periodic updater timer, not the one-time kernel reboot
+# timer. The kernel reboot timer is created by the runtime via
+# systemd-run and is entirely separate.
+OnCalendar=*-*-* 00,06,12,18:00:00
+# Run once shortly after boot if a scheduled tick was missed while the
+# machine was powered off.
+Persistent=true
+# Explicitly target the matching template instance.
+Unit=awesome-updater@%i.service
+
+[Install]
+WantedBy=timers.target

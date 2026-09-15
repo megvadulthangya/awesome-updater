@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Mock getent.
+#
+# Reads from MOCK_PASSWD_FILE when set. Falls back to the real getent
+# otherwise.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'getent' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "${1:-}" = "passwd" ]; then
+    key="${2:-}"
+    if [ -n "${MOCK_PASSWD_FILE:-}" ] && [ -r "$MOCK_PASSWD_FILE" ]; then
+        while IFS=: read -r u pw uid gid gecos home shell; do
+            if [ "$u" = "$key" ] || [ "$uid" = "$key" ]; then
+                printf '%s:%s:%s:%s:%s:%s:%s\n' \
+                    "$u" "$pw" "$uid" "$gid" "$gecos" "$home" "$shell"
+                exit 0
+            fi
+        done < "$MOCK_PASSWD_FILE"
+        exit 2
+    fi
+    # Fall back to the real getent when no mock passwd is configured.
+    for p in /usr/bin/getent /bin/getent; do
+        if [ -x "$p" ]; then
+            exec "$p" "$@"
+        fi
+    done
+    exit 2
+fi
+
+for p in /usr/bin/getent /bin/getent; do
+    if [ -x "$p" ]; then
+        exec "$p" "$@"
+    fi
+done
+exit 2

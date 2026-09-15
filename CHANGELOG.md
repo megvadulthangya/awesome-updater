@@ -22,6 +22,11 @@ and this project adheres to
 - Per-field cron schedule validation for `CRONTAB_SCHEDULE`.
 - `NOTIFY_GUI=false` now removes any previously created XDG autostart
   entry instead of leaving it in place.
+- Package-managed systemd template service and timer:
+  - `/usr/lib/systemd/system/awesome-updater@.service`
+  - `/usr/lib/systemd/system/awesome-updater@.timer`
+- `kernel-modules-hook` as a hard package dependency.
+- Isolated Bash test suite under `tests/` and Manjaro-based CI workflow.
 
 ### Changed
 - Project is being converted from a single-script implementation into a
@@ -31,6 +36,19 @@ and this project adheres to
 - `/etc/profile.d/99-system-update.sh` now honors `NOTIFY_PROFILE_D` by
   reading the configuration hierarchy directly at login time. The hook
   file itself is not rewritten at runtime.
+- Periodic execution moved from a user crontab entry to a package-managed
+  systemd timer. The package no longer modifies the user crontab.
+- `awesome-updater.install` now handles scheduler activation on install,
+  upgrade and removal via `systemctl enable`/`disable` on the
+  `awesome-updater@<user>.timer` template instance.
+- User discovery in `awesome-updater.install` uses `SUDO_USER`,
+  `PKEXEC_UID`, or `DOAS_USER` in that priority, and never selects root.
+- `config_error` now ensures the state directory exists before writing
+  `attention.state`, so an invalid configuration produces a persistent
+  attention state even on the very first invocation.
+- Logging initialization is best-effort: an unwritable `~/logs` no longer
+  aborts the updater, and file logging falls back cleanly to
+  stdout/stderr / systemd journal.
 - Crontab handling now removes only entries whose command is exactly the
   updater path, preserving unrelated jobs.
 - `config_error` uses `sudo -n` so an invalid configuration can never
@@ -40,17 +58,28 @@ and this project adheres to
 - Early failure paths in `system-update` preserve a pre-existing
   `kernel-reboot-needed` state instead of resetting `REBOOT_REQUIRED`.
 - Wall broadcasts are emitted on the AUR update failure path.
-- Package now declares `inetutils` as a runtime dependency and `cronie`
-  as an optional dependency.
+- Package now declares `inetutils` and `kernel-modules-hook` as runtime
+  dependencies. `cronie` is no longer required because the package no
+  longer manages a user crontab.
 - Runtime version string is single-sourced from `pkgver` via the
   `@VERSION@` placeholder.
 - README and man page wording updated to reflect the actual runtime
-  behaviour.
+  behaviour, the systemd scheduler, and the strict passwordless-sudo
+  expectation.
 
 ### Removed
 - Placeholder note in the changelog that claimed the runtime was not
   implemented.
 - Unused colour variables and dead locals in the runtime script.
+- User-crontab scheduling from the production runtime:
+  - `INSTALL_CRONTAB`
+  - `CRONTAB_SCHEDULE`
+  - `handle_crontab`
+  - `filter_updater_crontab`
+  - the associated validation and installation logic
+- The package-managed `crontab -` write path is gone entirely. Legacy
+  crontab entries referencing the updater are detected read-only and
+  reported, but never modified.
 
 ## [0.1.0] - 2026-09-14
 
