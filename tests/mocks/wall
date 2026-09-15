@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Mock wall. Reads stdin and exits.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'wall' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+cat >/dev/null 2>&1 || true
+exit "${MOCK_WALL_EXIT:-0}"

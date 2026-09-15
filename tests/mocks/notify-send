@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mock notify-send.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'notify-send' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+exit "${MOCK_NOTIFY_SEND_EXIT:-0}"

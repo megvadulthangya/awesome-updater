@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mock makepkg.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'makepkg' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+exit "${MOCK_MAKEPKG_EXIT:-0}"

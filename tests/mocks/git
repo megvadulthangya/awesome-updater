@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Mock git.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'git' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "${1:-}" = "clone" ]; then
+    # Last argument is the destination directory.
+    dest=""
+    for a in "$@"; do dest="$a"; done
+    if [ -n "$dest" ]; then
+        mkdir -p "$dest"
+        printf 'pkgname=yay\n' > "$dest/PKGBUILD"
+    fi
+fi
+
+exit "${MOCK_GIT_EXIT:-0}"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Mock systemctl.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'systemctl' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+sub="${1:-}"
+[ "$#" -gt 0 ] && shift
+
+if [ "$sub" = "is-active" ]; then
+    [ "${1:-}" = "--quiet" ] && shift
+    unit="${1:-}"
+    for u in ${MOCK_SYSTEMCTL_ACTIVE_UNITS:-}; do
+        [ "$u" = "$unit" ] && exit 0
+    done
+    exit 3
+fi
+
+exit 0

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Mock vercmp. Uses real vercmp if available, otherwise a simple fallback.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'vercmp' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ -n "${MOCK_VERCMP_EXIT:-}" ]; then
+    exit "$MOCK_VERCMP_EXIT"
+fi
+
+for p in /usr/bin/vercmp /usr/sbin/vercmp; do
+    if [ -x "$p" ]; then
+        exec "$p" "$@"
+    fi
+done
+
+# Minimal fallback.
+a="${1:-}"; b="${2:-}"
+if [ "$a" = "$b" ]; then
+    echo 0
+elif [[ "$a" < "$b" ]]; then
+    echo -1
+else
+    echo 1
+fi

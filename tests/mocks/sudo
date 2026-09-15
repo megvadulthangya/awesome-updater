@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Mock sudo. Logs the invocation, honors "sudo -n true" via
+# MOCK_SUDO_N_OK, and executes every other command unchanged (no real
+# privilege escalation).
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'sudo' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "$#" -eq 0 ]; then
+    exit 0
+fi
+
+if [ "$1" = "-n" ]; then
+    shift
+    if [ "$#" -eq 1 ] && [ "$1" = "true" ]; then
+        exit "${MOCK_SUDO_N_OK:-0}"
+    fi
+fi
+
+exec "$@"

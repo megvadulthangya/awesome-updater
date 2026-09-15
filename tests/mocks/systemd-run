@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Mock systemd-run.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'systemd-run' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "${1:-}" = "--help" ]; then
+    cat <<'EOF'
+systemd-run [OPTIONS...] COMMAND [ARGS...]
+
+  --collect
+  --on-calendar=SPEC
+  --unit=UNIT
+  --description=TEXT
+EOF
+    exit 0
+fi
+
+exit "${MOCK_SYSTEMD_RUN_EXIT:-0}"

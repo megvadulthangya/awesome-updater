@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock mhwd-kernel.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'mhwd-kernel' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "${1:-}" = "-li" ]; then
+    [ -n "${MOCK_MHWD_OUTPUT:-}" ] && printf '%s\n' "$MOCK_MHWD_OUTPUT"
+    exit 0
+fi
+
+exit 0

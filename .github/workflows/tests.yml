@@ -1,0 +1,162 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: ShellCheck and syntax (Manjaro)
+    # The host runner is only the CI worker. Every actual project step
+    # executes inside the Manjaro container below.
+    runs-on: ubuntu-latest
+    container:
+      image: manjarolinux/build:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck from Manjaro repositories
+        run: |
+          set -e
+          if [ "$(id -u)" -eq 0 ]; then
+            pacman -Sy --noconfirm --needed shellcheck
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm --needed shellcheck
+          else
+            echo "ERROR: neither root nor sudo available to install shellcheck" >&2
+            exit 1
+          fi
+
+      - name: Bash syntax check (bash -n)
+        run: |
+          set -e
+          bash -n system-update
+          bash -n system-update-notify
+          bash -n profile.d/99-system-update.sh
+          for f in tests/run-tests.sh tests/lib/*.sh tests/test-*.sh tests/mocks/*; do
+            bash -n "$f"
+          done
+
+      - name: ShellCheck
+        run: |
+          set -e
+          shellcheck --severity=warning \
+            system-update \
+            system-update-notify \
+            profile.d/99-system-update.sh \
+            tests/run-tests.sh \
+            tests/lib/*.sh \
+            tests/test-*.sh \
+            tests/mocks/*
+
+  unit-tests:
+    name: Unit tests (isolated mocks, Manjaro)
+    runs-on: ubuntu-latest
+    container:
+      image: manjarolinux/build:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies from Manjaro repositories
+        run: |
+          set -e
+          PKGS="bash coreutils findutils gawk grep sed util-linux inetutils"
+          if [ "$(id -u)" -eq 0 ]; then
+            pacman -Sy --noconfirm --needed $PKGS
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm --needed $PKGS
+          else
+            echo "ERROR: neither root nor sudo available to install test dependencies" >&2
+            exit 1
+          fi
+
+      - name: Prepare test executables
+        run: |
+          set -e
+          chmod +x tests/mocks/*
+          chmod +x tests/run-tests.sh
+          chmod +x tests/test-*.sh
+
+      - name: Run isolated test suite
+        run: ./tests/run-tests.sh
+
+  package-test:
+    name: Package build and validation (Manjaro)
+    runs-on: ubuntu-latest
+    container:
+      image: manjarolinux/build:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools from Manjaro repositories
+        run: |
+          set -e
+          PKGS="base-devel libarchive"
+          if [ "$(id -u)" -eq 0 ]; then
+            pacman -Sy --noconfirm --needed $PKGS
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm --needed $PKGS
+          else
+            echo "ERROR: neither root nor sudo available to install build tools" >&2
+            exit 1
+          fi
+
+      - name: Ensure non-root builder and workspace ownership
+        run: |
+          set -e
+          if [ "$(id -u)" -eq 0 ]; then
+            if ! id builduser >/dev/null 2>&1; then
+              useradd -m builduser
+            fi
+            chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          elif command -v sudo >/dev/null 2>&1; then
+            if ! id builduser >/dev/null 2>&1; then
+              sudo useradd -m builduser
+            fi
+            sudo chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          fi
+
+      - name: Build package with makepkg
+        run: |
+          set -e
+          if [ "$(id -u)" -eq 0 ]; then
+            su - builduser -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
+          else
+            sudo -u builduser bash -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
+          fi
+
+      - name: Verify package contents
+        run: |
+          set -e
+          pkg="$(ls "$GITHUB_WORKSPACE"/awesome-updater-*.pkg.tar.* | head -n1)"
+          echo "Package: $pkg"
+          pacman -Qlp "$pkg"
+
+          pacman -Qlp "$pkg" | grep -qE ' /usr/bin/system-update$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/bin/system-update-notify$'
+          pacman -Qlp "$pkg" | grep -qE ' /etc/profile.d/99-system-update.sh$'
+          pacman -Qlp "$pkg" | grep -qE ' /etc/system-update/config.conf$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update.1$'
+          pacman -Qlp "$pkg" | grep -qE ' /usr/share/man/man1/system-update-notify.1$'
+
+          bsdtar -xOf "$pkg" .PKGINFO | grep -q '^backup = etc/system-update/config.conf$'
+
+      - name: Confirm @VERSION@ placeholder was substituted
+        run: |
+          set -e
+          pkg="$(ls "$GITHUB_WORKSPACE"/awesome-updater-*.pkg.tar.* | head -n1)"
+          bsdtar -xOf "$pkg" usr/bin/system-update > /tmp/su.bin
+          if grep -q '@VERSION@' /tmp/su.bin; then
+            echo "ERROR: @VERSION@ placeholder was not substituted by prepare()"
+            exit 1
+          fi

@@ -13,18 +13,36 @@ on:
 
 jobs:
   shellcheck:
-    name: ShellCheck
+    name: ShellCheck (Manjaro)
+    # The host runner is only the CI worker. The project is validated
+    # inside the Manjaro container below.
     runs-on: ubuntu-latest
-
+    container:
+      image: manjarolinux/build:latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install ShellCheck from Manjaro repositories
+        run: |
+          set -e
+          if [ "$(id -u)" -eq 0 ]; then
+            pacman -Sy --noconfirm --needed shellcheck
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm --needed shellcheck
+          else
+            echo "ERROR: neither root nor sudo available to install shellcheck" >&2
+            exit 1
+          fi
+
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          severity: warning
-          scandir: "."
-          ignore_paths: >-
-            man
-            .github
+        run: |
+          set -e
+          shellcheck --severity=warning \
+            system-update \
+            system-update-notify \
+            profile.d/99-system-update.sh \
+            tests/run-tests.sh \
+            tests/lib/*.sh \
+            tests/test-*.sh \
+            tests/mocks/*

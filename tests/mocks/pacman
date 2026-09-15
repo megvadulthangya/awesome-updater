@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Mock pacman.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'pacman' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+sub="${1:-}"
+[ "$#" -gt 0 ] && shift
+
+case "$sub" in
+    -Q)
+        if [ "$#" -eq 0 ]; then
+            counter_file="${MOCK_STATE_DIR:-/tmp}/pacman_q_count"
+            count="$(cat "$counter_file" 2>/dev/null || echo 0)"
+            count=$((count + 1))
+            printf '%s\n' "$count" > "$counter_file"
+            qf=""
+            if [ -n "${MOCK_PACMAN_Q_FILE_1:-}" ] && [ -r "$MOCK_PACMAN_Q_FILE_1" ] && [ "$count" -eq 1 ]; then
+                qf="$MOCK_PACMAN_Q_FILE_1"
+            elif [ -n "${MOCK_PACMAN_Q_FILE_2:-}" ] && [ -r "$MOCK_PACMAN_Q_FILE_2" ] && [ "$count" -ge 2 ]; then
+                qf="$MOCK_PACMAN_Q_FILE_2"
+            elif [ -n "${MOCK_PACMAN_Q_FILE:-}" ] && [ -r "$MOCK_PACMAN_Q_FILE" ]; then
+                qf="$MOCK_PACMAN_Q_FILE"
+            fi
+            [ -n "$qf" ] && cat "$qf"
+            exit 0
+        fi
+        pkg="$1"
+        for p in ${MOCK_PACMAN_INSTALLED:-}; do
+            [ "$p" = "$pkg" ] && exit 0
+        done
+        exit 1
+        ;;
+    -Qo)
+        if [ -n "${MOCK_PACMAN_QO:-}" ]; then
+            printf '%s\n' "$MOCK_PACMAN_QO"
+            exit 0
+        fi
+        exit 1
+        ;;
+    -Syu)
+        exit "${MOCK_PACMAN_SYU_EXIT:-0}"
+        ;;
+    -S)
+        exit "${MOCK_PACMAN_S_EXIT:-0}"
+        ;;
+    *)
+        exit 0
+        ;;
+esac

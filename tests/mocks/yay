@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mock yay.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'yay' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+exit "${MOCK_YAY_EXIT:-0}"

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock hostname.
+
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'hostname' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ "$#" -eq 0 ]; then
+    printf '%s\n' "${MOCK_HOSTNAME:-test-host}"
+    exit 0
+fi
+
+exit 0
