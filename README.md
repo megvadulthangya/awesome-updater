@@ -1,5 +1,9 @@
 # awesome-updater
 
+[![Tests](https://github.com/megvadulthangya/awesome-updater/actions/workflows/tests.yml/badge.svg)](https://github.com/megvadulthangya/awesome-updater/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: Manjaro](https://img.shields.io/badge/Platform-Manjaro-35BF5C.svg)](https://manjaro.org/)
+
 A Manjaro-focused unattended system updater with persistent kernel reboot
 handling and user-facing notifications.
 
@@ -203,6 +207,50 @@ The state directory is fixed and is not configurable.
 The updater detects and reports `.pacnew` files under `/etc`. It never
 merges them and never deletes them. Merging is the administrator's
 decision.
+
+## Building the package
+
+The package is a VCS package. `makepkg` obtains the application source
+from the project's Git repository and derives the package version from
+the current revision:
+
+    git clone https://github.com/megvadulthangya/awesome-updater.git
+    cd awesome-updater
+    makepkg -f --noconfirm
+
+The resulting package name has the form:
+
+    awesome-updater-r<commit-count>.<short-sha>-<pkgrel>-any.pkg.tar.zst
+
+For reproducible CI builds against a local checkout, the VCS URL used by
+`makepkg` can be overridden without editing the PKGBUILD:
+
+    AWESOME_UPDATER_VCS_URL="file://$(pwd)" makepkg -f --noconfirm
+
+## Testing
+
+The project ships two complementary test suites.
+
+**Isolated unit tests** (run automatically in CI, safe everywhere, no
+real system modifications):
+
+    ./tests/run-tests.sh
+
+These build an isolated sandbox and mock every privileged tool
+(`pacman`, `systemctl`, `systemd-run`, `sudo`, `crontab`, `wall`,
+`notify-send`, `mhwd-kernel`, `vercmp`, `hostname`, `id`, `uname`,
+`git`, `makepkg`).
+
+**Portable real-Manjaro integration test** (manual, disposable test
+machine only):
+
+    integration/run-integration-test.sh
+
+This builds the package, installs it with `pacman -U`, inspects the live
+systemd timer and service, runs the real updater as the normal user, and
+exercises the real kernel-reboot lifecycle. It performs real system
+operations and may reboot the machine; read the header of the script
+before running it.
 
 ## Migration from an older manual installation
 
