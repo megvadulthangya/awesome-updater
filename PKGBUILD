@@ -27,21 +27,16 @@ optdepends=(
 backup=('etc/system-update/config.conf')
 install=awesome-updater.install
 
-# Project is self-contained; files live next to this PKGBUILD.
-#
-# The `name::url` alias syntax in makepkg is only meaningful for remote
-# sources. For local files makepkg uses the left side of "::" as the
-# destination filename in $srcdir, which causes it to look for that name
-# in the build directory. Local files must therefore be declared with
-# their natural relative path; makepkg copies each into $srcdir under its
-# basename. package() references those flat names.
+# Only files that live at the top level of the repository can be declared
+# directly in source=(). makepkg resolves local source entries by basename
+# against the directory where it was invoked and does not search
+# subdirectories; the name::path alias form is only meaningful for remote
+# sources. Files under profile.d/, config/ and man/ are therefore staged
+# into $srcdir by prepare() using $startdir (which makepkg sets to the
+# directory where it was invoked), and package() installs them normally.
 source=(
     'system-update'
     'system-update-notify'
-    'profile.d/99-system-update.sh'
-    'config/config.conf'
-    'man/system-update.1'
-    'man/system-update-notify.1'
     'README.md'
     'LICENSE'
 )
@@ -50,13 +45,18 @@ sha256sums=(
     'SKIP'
     'SKIP'
     'SKIP'
-    'SKIP'
-    'SKIP'
-    'SKIP'
-    'SKIP'
 )
 
 prepare() {
+    # Stage subdirectory sources into $srcdir under their basenames so that
+    # package() can install them normally. $startdir is set by makepkg to
+    # the directory where makepkg was invoked (the repository root in this
+    # project).
+    cp -a "$startdir/profile.d/99-system-update.sh" "$srcdir/99-system-update.sh"
+    cp -a "$startdir/config/config.conf"            "$srcdir/config.conf"
+    cp -a "$startdir/man/system-update.1"           "$srcdir/system-update.1"
+    cp -a "$startdir/man/system-update-notify.1"    "$srcdir/system-update-notify.1"
+
     # Single-source the runtime version string from pkgver.
     sed -i "s/@VERSION@/$pkgver/g" "$srcdir/system-update"
 }
