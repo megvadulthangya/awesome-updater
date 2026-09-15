@@ -431,6 +431,8 @@ load_config() {
 
 # Configuration error handler. Called only after logging is initialized.
 # Uses sudo -n only, so this path can never block on an interactive prompt.
+# The persistent reboot state on disk is authoritative: an invalid
+# configuration must not falsely clear a pending reboot requirement.
 config_error() {
     local msg="$1"
 
@@ -441,10 +443,12 @@ config_error() {
         local tmp
         tmp="$(mktemp 2>/dev/null || true)"
         if [ -n "$tmp" ]; then
+            local reboot_req
+            reboot_req="$(current_reboot_required)"
             cat > "$tmp" <<EOF
 NEEDS_ATTENTION=1
 UPDATE_FAILED=1
-REBOOT_REQUIRED=0
+REBOOT_REQUIRED=$reboot_req
 REBOOT_SCHEDULE_FAILED=0
 PACNEW_COUNT=0
 REASON=Invalid configuration
@@ -475,6 +479,10 @@ validate_boolean() {
 
 # Validate a single cron field. Accepts *, N, N-M, N/S, N-M/S, */S and
 # comma-separated lists of those. All numeric values must lie in [min, max].
+#
+# The field is split with `read -ra` under a local IFS so that no shell
+# pathname expansion can occur. A literal `*` in the field is accepted
+# as a valid element (it is a legal wildcard in every cron column).
 validate_cron_field() {
     local field="$1" min="$2" max="$3" name="$4"
     local item step lo hi val ok
@@ -482,9 +490,17 @@ validate_cron_field() {
     [ -n "$field" ] || config_error "$name must not be empty"
 
     local IFS=','
-    for item in $field; do
+    local -a items
+    read -ra items <<< "$field"
+
+    for item in "${items[@]}"; do
         [ -n "$item" ] || config_error "$name contains an empty list element"
         ok=0
+
+        # *
+        if [ "$ok" -eq 0 ] && [ "$item" = "*" ]; then
+            ok=1
+        fi
 
         # */S
         if [ "$ok" -eq 0 ] && [[ "$item" =~ ^\*/([0-9]+)$ ]]; then

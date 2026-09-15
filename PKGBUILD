@@ -28,14 +28,18 @@ backup=('etc/system-update/config.conf')
 install=awesome-updater.install
 
 # Project is self-contained; files live next to this PKGBUILD.
-# The alias syntax name::path maps a source file to a flat name in $srcdir.
+#
+# The `name::url` alias syntax is reserved for remote sources and would
+# cause makepkg to treat local files as URLs. Repository-local files are
+# therefore declared with their natural relative paths, and makepkg copies
+# them into $srcdir preserving the same relative path.
 source=(
     'system-update'
     'system-update-notify'
-    'profile.sh::profile.d/99-system-update.sh'
-    'config.conf::config/config.conf'
-    'system-update.1::man/system-update.1'
-    'system-update-notify.1::man/system-update-notify.1'
+    'profile.d/99-system-update.sh'
+    'config/config.conf'
+    'man/system-update.1'
+    'man/system-update-notify.1'
     'README.md'
     'LICENSE'
 )
@@ -66,16 +70,16 @@ package() {
     install -Dm755 "$srcdir/system-update-notify" \
         "$pkgdir/usr/bin/system-update-notify"
 
-    install -Dm644 "$srcdir/profile.sh" \
+    install -Dm644 "$srcdir/profile.d/99-system-update.sh" \
         "$pkgdir/etc/profile.d/99-system-update.sh"
 
-    install -Dm644 "$srcdir/config.conf" \
+    install -Dm644 "$srcdir/config/config.conf" \
         "$pkgdir/etc/system-update/config.conf"
 
-    install -Dm644 "$srcdir/system-update.1" \
+    install -Dm644 "$srcdir/man/system-update.1" \
         "$pkgdir/usr/share/man/man1/system-update.1"
 
-    install -Dm644 "$srcdir/system-update-notify.1" \
+    install -Dm644 "$srcdir/man/system-update-notify.1" \
         "$pkgdir/usr/share/man/man1/system-update-notify.1"
 
     install -Dm644 "$srcdir/README.md" \
