@@ -75,7 +75,6 @@ USER_CONFIG_WAS_PRESENT="$STATE_DIR/user-config.was-present"
 
 PKGNAME="awesome-updater"
 SERVICE_TEMPLATE="awesome-updater@.service"
-TIMER_TEMPLATE="awesome-updater@.timer"
 REBOOT_FLAG="/var/lib/system-update/kernel-reboot-needed"
 ATTENTION_STATE="/var/lib/system-update/attention.state"
 
@@ -524,7 +523,6 @@ check_kernel_update() {
     KERNEL_PACKAGE="$kpkg"
     KERNEL_TARGET="$kval"
     KERNEL_RUNNING="$krun"
-    KERNEL_UNIT="$kunit"
     return 0
 }
 
@@ -702,10 +700,9 @@ run_phase2() {
     [ -z "$user" ] && user="$(whoami)"
     info "Test user: $user"
 
-    local expected_pkg expected_target saved_running
+    local expected_pkg expected_target
     expected_pkg="$(read_state_field KERNEL_PACKAGE)"
     expected_target="$(read_state_field KERNEL_TARGET)"
-    saved_running="$(read_state_field KERNEL_RUNNING)"
 
     local current_kernel current_pkg
     current_kernel="$(uname -r)"
