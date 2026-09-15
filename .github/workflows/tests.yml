@@ -100,9 +100,16 @@ jobs:
           # inspection. The remaining packages are the PKGBUILD's runtime
           # dependencies; makepkg refuses to build if any declared
           # dependency is not resolvable from the installed set.
+          #
+          # systemd-sysvcompat is included explicitly because the Manjaro
+          # build image ships it pinned to the image's systemd version.
+          # Without upgrading both together, pacman refuses to install a
+          # newer systemd ("installing systemd breaks dependency
+          # 'systemd=...' required by systemd-sysvcompat").
           pacman -Sy --noconfirm --needed \
             base-devel \
             libarchive \
+            systemd-sysvcompat \
             bash \
             coreutils \
             inetutils \
