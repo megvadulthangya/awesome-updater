@@ -35,6 +35,7 @@ jobs:
           bash -n system-update-notify
           bash -n profile.d/99-system-update.sh
           bash -n awesome-updater.install
+          bash -n integration/run-integration-test.sh
           for f in tests/run-tests.sh tests/lib/*.sh tests/test-*.sh tests/mocks/*; do
             bash -n "$f"
           done
@@ -51,6 +52,12 @@ jobs:
             system-update-notify \
             profile.d/99-system-update.sh \
             awesome-updater.install
+
+      - name: ShellCheck integration script
+        run: |
+          set -e
+          shellcheck --severity=warning \
+            integration/run-integration-test.sh
 
       - name: ShellCheck test infrastructure
         run: |
@@ -94,6 +101,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history is required so that pkgver() can count commits
+          # in the local git checkout that makepkg will clone via file://.
+          fetch-depth: 0
 
       - name: Install build tools and runtime dependencies
         run: |
@@ -108,6 +119,7 @@ jobs:
           pacman -Sy --noconfirm --needed \
             base-devel \
             libarchive \
+            git \
             systemd-sysvcompat \
             bash \
             coreutils \
@@ -128,11 +140,19 @@ jobs:
             useradd -m builduser
           fi
           chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+          su builduser -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'" || true
 
-      - name: Build package with makepkg
+      - name: Build package with makepkg (VCS source)
         run: |
           set -e
-          su builduser -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
+          # Point the VCS source at the local checkout so the package is
+          # built from the exact commit under test rather than the remote
+          # HEAD. The PKGBUILD's default VCS URL is only used when this
+          # environment variable is not set.
+          su builduser -c "cd '$GITHUB_WORKSPACE' && \
+            AWESOME_UPDATER_VCS_URL='file://$GITHUB_WORKSPACE' \
+            makepkg -f --noconfirm"
 
       - name: Verify package contents
         run: |
@@ -164,3 +184,10 @@ jobs:
             echo "ERROR: @VERSION@ placeholder was not substituted by prepare()"
             exit 1
           fi
+
+      - name: Confirm pkgver was derived from git
+        run: |
+          set -e
+          pkg="$(ls "$GITHUB_WORKSPACE"/awesome-updater-*.pkg.tar.* | head -n1)"
+          bsdtar -xOf "$pkg" .PKGINFO | grep -E '^pkgver = r[0-9]+\.' \
+            || { echo "ERROR: pkgver is not in r<count>.<sha> format"; exit 1; }
