@@ -1,10 +1,34 @@
 #!/usr/bin/env bash
 # Mock makepkg.
+#
+# When invoked with an install flag (-i or -si), the mock simulates the
+# "package installed" side effect by creating a working yay stub in the
+# sandbox's bin directory. Without this, the runtime's post-bootstrap
+# `command_exists yay` check would fail even on a successful bootstrap.
 
 if [ -n "${MOCK_LOG:-}" ]; then
     printf 'makepkg' >> "$MOCK_LOG"
     for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
     printf '\n' >> "$MOCK_LOG"
+fi
+
+if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX/usr/bin" ]; then
+    for a in "$@"; do
+        case "$a" in
+            -i|--install|-si|--syncdeps)
+                cat > "$SANDBOX/usr/bin/yay" <<'EOS'
+#!/usr/bin/env bash
+if [ -n "${MOCK_LOG:-}" ]; then
+    printf 'yay' >> "$MOCK_LOG"
+    for a in "$@"; do printf ' %s' "$a" >> "$MOCK_LOG"; done
+    printf '\n' >> "$MOCK_LOG"
+fi
+exit "${MOCK_YAY_EXIT:-0}"
+EOS
+                chmod +x "$SANDBOX/usr/bin/yay"
+                ;;
+        esac
+    done
 fi
 
 exit "${MOCK_MAKEPKG_EXIT:-0}"

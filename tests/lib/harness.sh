@@ -108,7 +108,12 @@ sandbox_prepare() {
 
     : > "$SANDBOX_MOCK_LOG"
 
-    SANDBOX_PATH="$TESTS_DIR/mocks:$SANDBOX/usr/bin:$SANDBOX/usr/local/bin:$REAL_PATH"
+    # The sandbox bin directory is searched BEFORE the shared mocks so that
+    # tests which deliberately create a sandbox-local stub (for example a
+    # yay that returns failure, or a kernel package list) shadow the shared
+    # mock. This is required for tests that simulate "yay is missing" and
+    # "yay fails" without relying on removing shared mocks.
+    SANDBOX_PATH="$SANDBOX/usr/bin:$SANDBOX/usr/local/bin:$TESTS_DIR/mocks:$REAL_PATH"
 
     _prepare_script "$PROJECT_DIR/system-update" \
         "$SANDBOX/usr/bin/system-update" 0755
@@ -121,7 +126,11 @@ sandbox_prepare() {
     export MOCK_LOG="$SANDBOX_MOCK_LOG"
     export MOCK_STATE_DIR="$SANDBOX/mock-state"
     export MOCK_SUDO_N_OK=0
-    export MOCK_PACMAN_INSTALLED=""
+    # The pending-reboot check calls `pacman -Q <pkg>`. Common Manjaro
+    # kernel package names are marked as installed so that a
+    # kernel-reboot-needed file produced by a test is not treated as stale
+    # before the failure branch under test is reached.
+    export MOCK_PACMAN_INSTALLED="linux612 linux618 linux619 linux66"
     export MOCK_PACMAN_Q_FILE=""
     export MOCK_PACMAN_Q_FILE_1=""
     export MOCK_PACMAN_Q_FILE_2=""

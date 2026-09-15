@@ -23,9 +23,15 @@ test_gui_autostart_created_with_expected_exec() {
     assert_file_exists "$file" || return 1
     assert_file_contains "$file" "Exec=$SANDBOX/usr/bin/system-update-notify --gui-watch" || return 1
 
-    # File must be owned by the user, not root, i.e. not created via sudo.
-    assert_mock_not_called "sudo install" || return 1
-    assert_mock_not_called "sudo mkdir" || return 1
+    # The autostart file must be created in user space. The runtime may
+    # legitimately use `sudo install` to write /var/lib/system-update/*,
+    # so the assertion must be scoped to the autostart file itself.
+    if grep -E '^sudo .*system-update-notify\.desktop' "$SANDBOX_MOCK_LOG" >/dev/null; then
+        echo "    autostart file was created via sudo"
+        grep -nE '^sudo .*system-update-notify\.desktop' "$SANDBOX_MOCK_LOG" | sed 's/^/      /' >&2
+        return 1
+    fi
+    return 0
 }
 
 test_gui_autostart_removed_when_disabled() {
