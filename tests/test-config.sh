@@ -109,18 +109,25 @@ test_quoted_values_are_accepted() {
     assert_mock_called "pacman -Syu --noconfirm" || return 1
 }
 
+# The specification requires that an invalid configuration can never
+# block on an interactive sudo password prompt. Either a prior
+# "sudo -n true" probe or a strictly non-interactive "sudo -n ..." call
+# satisfies this. The current runtime uses the latter, so this test
+# asserts the invariant itself, not the specific mechanism.
 test_config_error_never_prompts_for_sudo() {
     sandbox_prepare
     _common_setup
     write_config "AUR_ENABLED=maybe"
-    export MOCK_SUDO_N_OK=1
 
     run_updater || return 1
     assert_exit 1 || return 1
-    # A config error must not need interactive sudo. The mock sudo does
-    # not fail on non-passwordless calls, but the script must not call
-    # sudo install before checking passwordless availability.
-    assert_mock_called "sudo -n true" || return 1
+
+    if grep -E '^sudo ' "$SANDBOX_MOCK_LOG" | grep -v '^sudo -n ' >/dev/null; then
+        echo "    found a sudo call without the -n flag in the config error path"
+        grep -E '^sudo ' "$SANDBOX_MOCK_LOG" | sed 's/^/      /' >&2
+        return 1
+    fi
+    return 0
 }
 
 t test_user_config_overrides_system_config

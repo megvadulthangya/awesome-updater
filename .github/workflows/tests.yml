@@ -14,8 +14,8 @@ on:
 jobs:
   shellcheck:
     name: ShellCheck and syntax (Manjaro)
-    # The host runner is only the CI worker. Every actual project step
-    # executes inside the Manjaro container below.
+    # The host runner is only the CI worker. Every project step executes
+    # inside the Manjaro container below.
     runs-on: ubuntu-latest
     container:
       image: manjarolinux/build:latest
@@ -26,14 +26,7 @@ jobs:
       - name: Install ShellCheck from Manjaro repositories
         run: |
           set -e
-          if [ "$(id -u)" -eq 0 ]; then
-            pacman -Sy --noconfirm --needed shellcheck
-          elif command -v sudo >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm --needed shellcheck
-          else
-            echo "ERROR: neither root nor sudo available to install shellcheck" >&2
-            exit 1
-          fi
+          pacman -Sy --noconfirm --needed shellcheck
 
       - name: Bash syntax check (bash -n)
         run: |
@@ -45,13 +38,22 @@ jobs:
             bash -n "$f"
           done
 
-      - name: ShellCheck
+      - name: ShellCheck production scripts
+        run: |
+          set -e
+          # SC2034 (unused variable) is a known issue in the production
+          # runtime tracked for a later production fix phase. Runtime
+          # behavior must not change during the test-infrastructure phase,
+          # so SC2034 is excluded here only.
+          shellcheck --severity=warning --exclude=SC2034 \
+            system-update \
+            system-update-notify \
+            profile.d/99-system-update.sh
+
+      - name: ShellCheck test infrastructure
         run: |
           set -e
           shellcheck --severity=warning \
-            system-update \
-            system-update-notify \
-            profile.d/99-system-update.sh \
             tests/run-tests.sh \
             tests/lib/*.sh \
             tests/test-*.sh \
@@ -69,15 +71,8 @@ jobs:
       - name: Install test dependencies from Manjaro repositories
         run: |
           set -e
-          PKGS="bash coreutils findutils gawk grep sed util-linux inetutils"
-          if [ "$(id -u)" -eq 0 ]; then
-            pacman -Sy --noconfirm --needed $PKGS
-          elif command -v sudo >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm --needed $PKGS
-          else
-            echo "ERROR: neither root nor sudo available to install test dependencies" >&2
-            exit 1
-          fi
+          pacman -Sy --noconfirm --needed \
+            bash coreutils findutils gawk grep sed util-linux inetutils
 
       - name: Prepare test executables
         run: |
@@ -98,42 +93,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools from Manjaro repositories
+      - name: Install build tools and runtime dependencies
         run: |
           set -e
-          PKGS="base-devel libarchive"
-          if [ "$(id -u)" -eq 0 ]; then
-            pacman -Sy --noconfirm --needed $PKGS
-          elif command -v sudo >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm --needed $PKGS
-          else
-            echo "ERROR: neither root nor sudo available to install build tools" >&2
-            exit 1
-          fi
+          # base-devel and libarchive are needed for makepkg and archive
+          # inspection. The remaining packages are the PKGBUILD's runtime
+          # dependencies; makepkg refuses to build if any declared
+          # dependency is not resolvable from the installed set.
+          pacman -Sy --noconfirm --needed \
+            base-devel \
+            libarchive \
+            bash \
+            coreutils \
+            inetutils \
+            pacman \
+            systemd \
+            findutils \
+            gawk \
+            grep \
+            sed \
+            util-linux
 
-      - name: Ensure non-root builder and workspace ownership
+      - name: Create non-root builder and chown workspace
         run: |
           set -e
-          if [ "$(id -u)" -eq 0 ]; then
-            if ! id builduser >/dev/null 2>&1; then
-              useradd -m builduser
-            fi
-            chown -R builduser:builduser "$GITHUB_WORKSPACE"
-          elif command -v sudo >/dev/null 2>&1; then
-            if ! id builduser >/dev/null 2>&1; then
-              sudo useradd -m builduser
-            fi
-            sudo chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          if ! id builduser >/dev/null 2>&1; then
+            useradd -m builduser
           fi
+          chown -R builduser:builduser "$GITHUB_WORKSPACE"
 
       - name: Build package with makepkg
         run: |
           set -e
-          if [ "$(id -u)" -eq 0 ]; then
-            su - builduser -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
-          else
-            sudo -u builduser bash -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
-          fi
+          su builduser -c "cd '$GITHUB_WORKSPACE' && makepkg -f --noconfirm"
 
       - name: Verify package contents
         run: |

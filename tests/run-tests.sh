@@ -9,6 +9,10 @@
 #
 # Every test file is fully isolated: no real package manager, no real
 # reboot, no real cron, no real sudo, no network access.
+#
+# Stdin is explicitly redirected to /dev/null for each test process so that
+# helpers which historically used `cat > file` can never consume bytes from
+# the CI runner's stdin.
 
 set -u
 
@@ -35,7 +39,6 @@ PASSED=0
 FAILED=0
 FAILED_FILES=()
 
-# Optional filter: pass test file paths as arguments.
 if [ "$#" -gt 0 ]; then
     FILES=("$@")
 else
@@ -55,7 +58,7 @@ for f in "${FILES[@]}"; do
     echo
     echo "${BOLD}==> ${rel}${NC}"
 
-    out="$(bash "$f" 2>&1)"
+    out="$(bash "$f" </dev/null 2>&1)"
     rc=$?
     printf '%s\n' "$out"
 

@@ -27,7 +27,6 @@ export REAL_PATH REAL_HOME
 HARNESS_TOTAL=0
 HARNESS_PASSED=0
 HARNESS_FAILED=0
-HARNESS_CURRENT=""
 
 SANDBOX=""
 SANDBOX_HOME=""
@@ -48,7 +47,6 @@ PROFILE_EXIT=0
 t() {
     local name="$1"
     HARNESS_TOTAL=$((HARNESS_TOTAL + 1))
-    HARNESS_CURRENT="$name"
 
     if "$name"; then
         printf '  PASS: %s\n' "$name"
@@ -166,16 +164,33 @@ _prepare_script() {
 }
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Config writers
+#
+# These accept the entire configuration content as a single argument. They
+# MUST NOT read from stdin: on CI runners the test process's stdin is not
+# a terminal and may carry unexpected bytes, which previously caused the
+# sandbox config to be populated with garbage.
 # ---------------------------------------------------------------------------
 
 write_config() {
-    cat > "$SANDBOX/etc/system-update/config.conf"
+    if [ "$#" -ge 1 ]; then
+        printf '%s\n' "$1" > "$SANDBOX/etc/system-update/config.conf"
+    else
+        : > "$SANDBOX/etc/system-update/config.conf"
+    fi
 }
 
 write_user_config() {
-    cat > "$SANDBOX_HOME/.config/system-update/config.conf"
+    if [ "$#" -ge 1 ]; then
+        printf '%s\n' "$1" > "$SANDBOX_HOME/.config/system-update/config.conf"
+    else
+        : > "$SANDBOX_HOME/.config/system-update/config.conf"
+    fi
 }
+
+# ---------------------------------------------------------------------------
+# Mock setup helpers
+# ---------------------------------------------------------------------------
 
 setup_pacman_q() {
     local content="$1"
@@ -195,63 +210,54 @@ setup_pacman_before_after() {
     export MOCK_PACMAN_Q_FILE_2="$fa"
 }
 
-reset_pacman_call_counter() {
-    rm -f "$SANDBOX/mock-state/pacman_q_count"
-}
+# ---------------------------------------------------------------------------
+# Runtime invocation helpers
+#
+# Stdin is redirected to /dev/null so the runtime can never consume bytes
+# from the CI runner's stdin.
+# ---------------------------------------------------------------------------
 
 run_updater() {
     local args=("$@")
-    local old_home="$HOME"
-    local old_path="$PATH"
 
     set +e
     UPDATER_OUTPUT="$(
         PATH="$SANDBOX_PATH" HOME="$SANDBOX_HOME" \
-            bash "$SANDBOX/usr/bin/system-update" "${args[@]}" 2>&1
+            bash "$SANDBOX/usr/bin/system-update" "${args[@]}" \
+            </dev/null 2>&1
     )"
     UPDATER_EXIT=$?
     set -e
-
-    PATH="$old_path"
-    HOME="$old_home"
 
     sleep 0.1
 }
 
 run_notify() {
     local args=("$@")
-    local old_home="$HOME"
-    local old_path="$PATH"
 
     set +e
     NOTIFY_OUTPUT="$(
         PATH="$SANDBOX_PATH" HOME="$SANDBOX_HOME" \
-            bash "$SANDBOX/usr/bin/system-update-notify" "${args[@]}" 2>&1
+            bash "$SANDBOX/usr/bin/system-update-notify" "${args[@]}" \
+            </dev/null 2>&1
     )"
     NOTIFY_EXIT=$?
     set -e
-
-    PATH="$old_path"
-    HOME="$old_home"
 
     sleep 0.05
 }
 
 run_profile_hook() {
     local hook="$SANDBOX/etc/profile.d/99-system-update.sh"
-    local old_home="$HOME"
-    local old_path="$PATH"
 
     set +e
     PROFILE_OUTPUT="$(
         PATH="$SANDBOX_PATH" HOME="$SANDBOX_HOME" \
-            bash --norc --noprofile -i -c "source \"$hook\"" 2>/dev/null
+            bash --norc --noprofile -i -c "source \"$hook\"" \
+            </dev/null 2>/dev/null
     )"
     PROFILE_EXIT=$?
     set -e
-
-    PATH="$old_path"
-    HOME="$old_home"
 
     sleep 0.05
 }
@@ -275,6 +281,16 @@ assert_notify_exit() {
     if [ "$NOTIFY_EXIT" -ne "$expected" ]; then
         echo "    assert_notify_exit FAILED: expected $expected, got $NOTIFY_EXIT"
         printf '%s\n' "$NOTIFY_OUTPUT" | sed 's/^/      /' >&2
+        return 1
+    fi
+    return 0
+}
+
+assert_profile_exit() {
+    local expected="$1"
+    if [ "$PROFILE_EXIT" -ne "$expected" ]; then
+        echo "    assert_profile_exit FAILED: expected $expected, got $PROFILE_EXIT"
+        printf '%s\n' "$PROFILE_OUTPUT" | sed 's/^/      /' >&2
         return 1
     fi
     return 0
