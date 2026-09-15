@@ -87,18 +87,21 @@ test_quoted_values_are_accepted() {
     assert_mock_called "pacman -Syu --noconfirm" || return 1
 }
 
+# Legacy keys are no longer recognized. They must be ignored, not fatal,
+# and must not cause any crontab WRITE. A read-only `crontab -l` probe is
+# permitted by the design and is therefore not asserted against.
 test_removed_crontab_keys_are_ignored() {
     sandbox_prepare
     _common_setup
-    # Legacy keys are no longer recognized. They must be ignored, not
-    # fatal, and must not cause any crontab modification.
     write_config $'INSTALL_CRONTAB=true\nCRONTAB_SCHEDULE=0 */6 * * *\nAUTOMATIC_REBOOT=false'
 
     run_updater || return 1
     assert_exit 0 || return 1
     assert_output_contains "Ignoring unknown configuration key 'INSTALL_CRONTAB'" || return 1
     assert_output_contains "Ignoring unknown configuration key 'CRONTAB_SCHEDULE'" || return 1
-    assert_mock_not_called "crontab -" || return 1
+    # The write form is exactly the line "crontab -" (stdin replaced by
+    # the runtime). Read-only probes such as "crontab -l" are allowed.
+    assert_mock_no_line "crontab -" || return 1
 }
 
 test_config_error_never_prompts_for_sudo() {
